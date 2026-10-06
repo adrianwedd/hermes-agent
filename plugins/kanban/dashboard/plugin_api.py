@@ -519,6 +519,7 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 # --- PATCH /tasks/:id  and  POST /tasks/bulk ---------------------------------
 
 class UpdateTaskBody(BaseModel):
+    dispatch_eligible: Optional[bool] = None
     status: Optional[str] = None
     assignee: Optional[str] = None
     priority: Optional[int] = None
@@ -540,6 +541,7 @@ class UpdateTaskBody(BaseModel):
 
 
 class BulkTaskBody(BaseModel):
+    dispatch_eligible: Optional[bool] = None
     ids: list[str]
     status: Optional[str] = None
     assignee: Optional[str] = None  # "" or None = unassign
@@ -687,6 +689,8 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if payload.assignee is not None and not review_assignee_deferred:
             with _map_errors(409, RuntimeError):
                 _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
+        if payload.dispatch_eligible is not None:
+            _require_ok(kanban_db.edit_task(conn, task_id, dispatch_eligible=payload.dispatch_eligible))
         if payload.status is not None:
             _patch_status(conn, task_id, payload, review_assignee_deferred)
         for wanted, apply, _refused in _OVERRIDE_OPS:
@@ -832,6 +836,9 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
                 entry.update(ok=False, error="assign refused")
         except RuntimeError as e:
             entry.update(ok=False, error=str(e))
+    if payload.dispatch_eligible is not None:
+        if not kanban_db.edit_task(conn, tid, dispatch_eligible=payload.dispatch_eligible):
+            entry.update(ok=False, error="eligibility edit refused")
     if payload.priority is not None:
         _set_priority(conn, tid, payload.priority, board)
     for wanted, apply, refused in _OVERRIDE_OPS:

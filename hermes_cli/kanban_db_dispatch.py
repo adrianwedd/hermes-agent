@@ -2042,6 +2042,12 @@ def _dispatch_lane_task(
     skip is recorded on ``result``.
     """
     task_id = row["id"]
+    task = _kb.get_task(conn, task_id)
+    from hermes_cli.kanban_administrative_hold import administrative_pending
+    from hermes_cli.kanban_completion_workflow import operator_contract_pending
+    if task is None or not task.dispatch_eligible or administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
+        result.respawn_guarded.append((task_id, "dispatch_eligible=false or administrative_pending"))
+        return False
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
     # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready
     # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
@@ -2490,8 +2496,7 @@ def _rotate_worker_log(
 
 
 def _module_hermes_argv() -> list[str]:
-    """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
-    console-script target — there is no top-level ``hermes`` package)."""
+    """Interpreter-bound console-script target; there is no top-level hermes package."""
     return [sys.executable, "-m", "hermes_cli.main"]
 
 
@@ -2613,12 +2618,7 @@ def _worker_terminal_timeout_env(
     max_runtime_seconds: Optional[int],
     current_timeout: Optional[str],
 ) -> Optional[str]:
-    """Return a worker-scoped TERMINAL_TIMEOUT override, if needed.
-
-    When ``max_runtime_seconds`` exceeds the terminal tool's default timeout,
-    raise only the child's default so a long command isn't killed by the
-    generic terminal default first.
-    """
+    """Raise only the child's terminal default to fit its task runtime ceiling."""
     if max_runtime_seconds is None:
         return None
     try:

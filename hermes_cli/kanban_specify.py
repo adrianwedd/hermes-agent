@@ -127,6 +127,12 @@ def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
     """``(task, "")`` when the task exists and is in triage, else ``(None, reason)``."""
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
+        from hermes_cli.kanban_administrative_hold import administrative_pending
+        if task is not None and (not task.dispatch_eligible or administrative_pending(conn, task_id)):
+            return None, "dispatch eligibility or administrative receipt hold; automatic specification cannot admit this card"
+        from hermes_cli.kanban_completion_workflow import operator_contract_pending
+        if task is not None and operator_contract_pending(conn, task_id):
+            return None, "operator completion declaration required; automatic specification cannot repair it"
     if task is None:
         return None, "unknown task id"
     if task.status != "triage":
@@ -167,13 +173,17 @@ def _call_aux(verb: str, task_id: str, *, aux_task: str, system: str, user: str,
         # Route through call_llm so auxiliary.triage_specifier.* config (provider/model/base_url,
         # extra_body, reasoning_effort, retries) all apply — the direct-create path dropped extra_body
         # (#35566).
-        resp = call_llm(
-            task=aux_task,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.3,
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
+        from hermes_cli.kanban_intake_admission import intake_permit
+        with intake_permit(aux_task) as refused:
+            if refused:
+                return None, refused
+            resp = call_llm(
+                task=aux_task,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.3,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
     except Exception as exc:
         suffix = " — skipping" if verb == "specify" else ""
         log.info("%s: API call failed for %s (%s)%s", verb, task_id, exc, suffix)

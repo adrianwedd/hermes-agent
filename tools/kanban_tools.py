@@ -745,11 +745,16 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        from hermes_cli.kanban_completion_workflow import require_declared_contract
+        require_declared_contract(conn, tid)
+        from hermes_cli.kanban_completion_evidence import prepare_gate
+        evidence_gate = prepare_gate(conn, tid, metadata, expected_run_id=_worker_run_id(tid))
+        _check(evidence_gate is not False, "completion evidence snapshot changed; preserve artifacts and retry the handoff")
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
-                created_cards=created_cards, expected_run_id=_worker_run_id(tid))
+                created_cards=created_cards, expected_run_id=_worker_run_id(tid), _prepared_evidence=evidence_gate)
         except kb.ArtifactPreservationError as artifact_err:
             # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
             # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
