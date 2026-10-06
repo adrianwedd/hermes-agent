@@ -2623,7 +2623,8 @@ def _relay_sync_completion(
     api_mode: str | None = None, create: Callable[[dict[str, Any]], Any] | None = None,
 ) -> Any:
     from agent.auxiliary_wire import prepare_chat_messages
-
+    from agent.auxiliary_route_fence import validate_call
+    validate_call(client, kwargs, provider)
     kwargs = prepare_chat_messages(client, kwargs)
     # The progress hook is installed per TASK, so every attempt (retries, recovery rungs, fallbacks)
     # must stream through _create_with_progress or the compression watchdog sees silence (#98466).
@@ -2663,7 +2664,8 @@ async def _relay_async_completion(
     api_mode: str | None = None, create: Callable[[dict[str, Any]], Any] | None = None,
 ) -> Any:
     from agent.auxiliary_wire import prepare_chat_messages
-
+    from agent.auxiliary_route_fence import validate_call
+    validate_call(client, kwargs, provider)
     kwargs = prepare_chat_messages(client, kwargs)
     # Async twin of the seam default above (#98466).
     callback = create or (lambda request: _acreate_with_progress(client, request))
@@ -7877,6 +7879,9 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     response) bypass the explicit-provider gate — the provider cannot serve this request
     regardless of user intent. Auth errors from an explicit provider may only use the task's
     own configured fallback_chain; they never imply an unconfigured provider hop."""
+    from agent.auxiliary_route_fence import fallback_allowed
+    if not fallback_allowed():
+        return None
     task, tag, resolved_provider = route.task, route.tag, route.resolved_provider
     # Respect explicit provider choice for transient errors (auth, request validation, etc.) but allow
     # fallback when the provider clearly cannot serve the request due to capacity: payment/quota exhaustion
@@ -8151,17 +8156,7 @@ def _plan_aux_call(
     return req, retry_kwargs, candidate_kwargs
 
 
-def _should_retry_same_provider(task: Optional[str], exc: Exception, tag: str) -> bool:
-    """True when ``exc`` is a transient transport blip worth a same-provider retry; critical-path
-    tasks skip it on a full-budget timeout (``_should_skip_same_provider_retry``) and go straight
-    to fallback."""
-    if not _is_transient_transport_error(exc):
-        return False
-    if _should_skip_same_provider_retry(task, exc):
-        logger.info("Auxiliary %s%s: timeout on the critical path; "
-                    "skipping same-provider retry and falling back: %s", task, tag, exc)
-        return False
-    return True
+from agent.auxiliary_retry_policy import _should_retry_same_provider
 
 
 def _ladder_step_call(

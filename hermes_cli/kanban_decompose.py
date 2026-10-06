@@ -275,6 +275,8 @@ def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) ->
     raw_tasks = parsed.get("tasks") or []
     if not isinstance(raw_tasks, list) or not raw_tasks:
         return DecomposeOutcome(task_id, False, "decomposer returned fanout=true with empty tasks list")
+    if len(raw_tasks) > 6:
+        return DecomposeOutcome(task_id, False, "decomposer exceeded the six-child intake bound")
     children, reason = _clean_children(task_id, raw_tasks, routing)
     if reason:
         return DecomposeOutcome(task_id, False, reason)
