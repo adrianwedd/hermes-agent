@@ -263,6 +263,41 @@ def test_completed_scope_without_selected_action_never_manufactures_work(board):
     assert decision["next_action"] is None
 
 
+def test_completed_scope_ignores_stale_selected_action(board):
+    """Accepted terminal truth outranks obsolete action metadata."""
+    tid = _task(board, "accepted work with stale action", status="ready")
+    _contract(
+        board, tid,
+        accepted_completed_actions=["bounded scope accepted"],
+        remaining_required_actions=[],
+        selected_next_action={"action": "obsolete action", "type": "worker_action"},
+    )
+    decision = decide(board, kb.get_task(board, tid))
+    assert decision["workflow_stage"] == "DONE"
+    assert decision["dispatchable"] is False
+    assert decision["next_action"] is None
+
+
+def test_recompute_preserves_native_scheduled_wait(board):
+    """A future wake remains Scheduled rather than becoming held Todo."""
+    tid = _task(board, "wait for maintenance window", status="scheduled", eligible=True)
+    _contract(
+        board, tid,
+        selected_next_action={"action": "run maintenance", "type": "worker_action"},
+        external_conditions=[{
+            "condition_id": "window", "requirement": "maintenance window opens",
+            "resolver": "scheduler", "resume_condition": "scheduled time arrives",
+            "satisfied": False,
+        }],
+    )
+    before = decide(board, kb.get_task(board, tid))
+    assert before["workflow_stage"] == "WAITING"
+    assert kb.recompute_ready(board) == 0
+    task = kb.get_task(board, tid)
+    assert (task.status, task.dispatch_eligible) == ("scheduled", True)
+    assert decide(board, task)["workflow_stage"] == "WAITING"
+
+
 def test_unchanged_no_work_assessment_is_idempotent(board):
     tid = _task(board, "known future wait", status="triage")
     _contract(board, tid, remaining_required_actions=[])

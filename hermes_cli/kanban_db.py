@@ -2269,7 +2269,9 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                 continue
             targets = {
                 "TRIAGE": "triage", "PREPARE": "todo", "READY": "ready",
-                "REVIEW": "review", "WAITING": "todo", "BLOCKED": "blocked",
+                "REVIEW": "review",
+                "WAITING": "scheduled" if cur_status == "scheduled" else "todo",
+                "BLOCKED": "blocked",
             }
             target = targets.get(stage)
             if target is None or target == cur_status:

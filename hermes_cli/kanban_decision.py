@@ -240,6 +240,7 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
     health = _execution_health(conn, task_id)
     accepted = list(contract.get("accepted_completed_actions") or [])
     remaining = list(contract.get("remaining_required_actions") or [])
+    remaining_declared = "remaining_required_actions" in contract
     evidence_rows = conn.execute(
         "SELECT id,kind,payload FROM task_events WHERE task_id=? AND kind IN ("
         "'completion_evidence_accepted','review_approved','completed',"
@@ -445,6 +446,13 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
                                 resume_condition="dispatch eligibility changes")
                 decision["invariant_violations"].append(
                     "REVIEW advertised runnable but claim rejects")
+        elif remaining_declared and not remaining and accepted:
+            decision.update(
+                workflow_stage="DONE", dispatchable=False,
+                reason="All required actions have accepted evidence and no action remains",
+                owner=None, next_action=None, current_next_action=None,
+                current_next_action_type=None,
+            )
         elif status in ("ready", "todo") and eligible and selected.get("action"):
             action = selected["action"]
             decision.update(workflow_stage="READY", dispatchable=True,
@@ -452,13 +460,6 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
                             owner=t.get("assignee"), next_action=action,
                             current_next_action=action,
                             current_next_action_type=selected.get("type") or "worker_action")
-        elif not remaining and accepted:
-            decision.update(
-                workflow_stage="DONE", dispatchable=False,
-                reason="All required actions have accepted evidence and no action remains",
-                owner=None, next_action=None, current_next_action=None,
-                current_next_action_type=None,
-            )
         elif status in ("ready", "todo") and eligible:
             decision.update(
                 workflow_stage="PREPARE",
