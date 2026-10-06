@@ -9,14 +9,14 @@ def operator_contract_pending(conn, task_id):
         return False
     except ValueError:
         pass
-    row=conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='completion_evidence_rejected' ORDER BY id DESC LIMIT 1",(task_id,)).fetchone()
-    if not row:
-        return False
-    try:
-        missing=json.loads(row[0]or'{}').get('missing',[])
-    except (ValueError,AttributeError):
-        return False
-    return any(isinstance(x,str)and x.startswith('Operator must declare')for x in missing)
+    # A valid operator declaration is the only release; later/corrupt rejection
+    # payloads cannot erase a structural handoff. Legacy rejections are native
+    # evidence of the same completion boundary, not proof of completed work.
+    return conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id=? AND kind IN "
+        "('operator_contract_handoff','completion_evidence_rejected') LIMIT 1",
+        (task_id,),
+    ).fetchone() is not None
 
 def route_completion_block(conn, task_id, kind, reason, source_status, **kwargs):
     from hermes_cli import kanban_db as kb
@@ -28,12 +28,13 @@ def route_completion_block(conn, task_id, kind, reason, source_status, **kwargs)
     return result
 
 def require_declared_contract(conn, task_id):
-    from hermes_cli.kanban_completion_evidence import contract_record,validate_contract,_refuse
+    from hermes_cli.kanban_completion_evidence import contract_record,validate_contract,_refuse,_snapshot
+    snapshot = _snapshot(conn, task_id)
     _,contract=contract_record(conn,task_id)
     try:
         validate_contract(contract)
     except ValueError as exc:
-        _refuse(conn,task_id,['Operator must declare the card’s explicit completion requirements: '+str(exc)+'. Worker cannot repair this by rewriting the body; preserve artifacts, request review or block needs_input once. No synthesis/test/model rerun.'])
+        _refuse(conn,task_id,['Operator must declare the card’s explicit completion requirements: '+str(exc)+'. Worker cannot repair this by rewriting the body; preserve artifacts, request review or block needs_input once. No synthesis/test/model rerun.'], expected_snapshot=snapshot)
 
 def append_completion_context(lines, conn, task_id):
     from hermes_cli.kanban_completion_evidence import contract_record,validate_contract

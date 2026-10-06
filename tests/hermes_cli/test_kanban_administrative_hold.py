@@ -97,3 +97,50 @@ def test_terminal_event_retention_does_not_erase_admin_stop(card):
     conn.commit()
     kb.gc_events(conn, older_than_seconds=0)
     assert administrative_pending(conn, tid)
+
+
+def test_missing_operator_contract_parks_without_claiming_substantive_completion(card):
+    from hermes_cli.kanban_completion_evidence import CompletionEvidenceError, set_requirements
+    from hermes_cli.kanban_completion_workflow import require_declared_contract, operator_contract_pending
+    conn, tid = card
+    with pytest.raises(CompletionEvidenceError):
+        require_declared_contract(conn, tid)
+    assert not kb.get_task(conn, tid).dispatch_eligible
+    assert operator_contract_pending(conn, tid)
+    assert not administrative_pending(conn, tid)  # No inferred substantive-complete assertion.
+    conn.execute("UPDATE tasks SET status='ready',dispatch_eligible=1 WHERE id=?", (tid,))
+    conn.commit()
+    assert kb.claim_task(conn, tid) is None
+    assert kb.claim_review_task(conn, tid) is None
+    # An ordinary operator declaration resolves the structural hold, without fake completion.
+    assert set_requirements(conn, tid, {"version": 1, "kind": "research", "criteria": ["existing_evidence"]},
+        expected_status="ready", expected_assignee=None)
+    assert not operator_contract_pending(conn, tid)
+    assert kb.claim_task(conn, tid) is not None
+
+
+def test_later_rejection_cannot_erase_missing_operator_declaration(card):
+    from hermes_cli.kanban_completion_workflow import require_declared_contract, operator_contract_pending
+    from hermes_cli.kanban_completion_evidence import CompletionEvidenceError
+    conn, tid = card
+    with pytest.raises(CompletionEvidenceError):
+        require_declared_contract(conn, tid)
+    conn.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,?,?,?)",
+        (tid, "completion_evidence_rejected", '{broken', 2))
+    conn.execute("UPDATE tasks SET status='ready',dispatch_eligible=1 WHERE id=?", (tid,))
+    conn.commit()
+    assert operator_contract_pending(conn, tid)
+    assert kb.claim_task(conn, tid) is None
+
+
+def test_stale_missing_contract_preflight_cannot_park_new_owner(card):
+    from hermes_cli.kanban_completion_evidence import _snapshot, _refuse, CompletionEvidenceError
+    from hermes_cli.kanban_completion_workflow import operator_contract_pending
+    conn, tid = card
+    old = _snapshot(conn, tid)
+    conn.execute("UPDATE tasks SET assignee='new-owner' WHERE id=?", (tid,))
+    conn.commit()
+    with pytest.raises(CompletionEvidenceError, match="snapshot changed"):
+        _refuse(conn, tid, ["Operator must declare requirements"], expected_snapshot=old)
+    assert kb.get_task(conn, tid).dispatch_eligible
+    assert not operator_contract_pending(conn, tid)

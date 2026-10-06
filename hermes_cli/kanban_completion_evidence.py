@@ -173,6 +173,8 @@ def _refuse(conn, task_id, missing, *, expected_snapshot=None):
     from hermes_cli.kanban_db_connect import write_txn
 
     with write_txn(conn):
+        if expected_snapshot is not None and _snapshot(conn, task_id) != expected_snapshot:
+            raise CompletionEvidenceError(task_id, ["Completion snapshot changed; preserve the current owner and reread"])
         _, current_contract = contract_record(conn, task_id)
         operator_review_pending = (
             isinstance(current_contract, dict)
@@ -182,6 +184,20 @@ def _refuse(conn, task_id, missing, *, expected_snapshot=None):
             and _snapshot(conn, task_id) == expected_snapshot
             and any(reason in {'Reviewed coding acceptance requires operator approval from REVIEW; request-review preserves the handoff', 'Explicit local-only coding still requires approved REVIEW unless its operator contract waives review'} for reason in missing if isinstance(reason, str))
         )
+        try:
+            validate_contract(current_contract)
+            operator_declaration_pending = False
+        except ValueError:
+            operator_declaration_pending = any(
+                isinstance(reason, str) and reason.startswith("Operator must declare")
+                for reason in missing
+            )
+        if operator_declaration_pending:
+            conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=?", (task_id,))
+            kb._append_event(conn, task_id, "operator_contract_handoff", {
+                "automatic_retry": False, "dispatch_eligible": False,
+                "operator_action_required": True,
+            })
         if operator_review_pending:
             conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=? AND status IN ('ready','running','review','blocked')", (task_id,))
             kb._append_event(conn, task_id, 'operator_review_handoff', {'automatic_retry': False, 'dispatch_eligible': False})
@@ -470,6 +486,7 @@ def prepare_gate(
                 "Operator must declare the card’s explicit completion requirements: "
                 + str(exc)
             ],
+            expected_snapshot=snapshot,
         )
     evidence, artifacts, missing = _durable_evidence(
         conn, task_id, cid, contract, metadata

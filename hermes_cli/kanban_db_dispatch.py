@@ -2044,7 +2044,8 @@ def _dispatch_lane_task(
     task_id = row["id"]
     task = _kb.get_task(conn, task_id)
     from hermes_cli.kanban_administrative_hold import administrative_pending
-    if task is None or not task.dispatch_eligible or administrative_pending(conn, task_id):
+    from hermes_cli.kanban_completion_workflow import operator_contract_pending
+    if task is None or not task.dispatch_eligible or administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
         result.respawn_guarded.append((task_id, "dispatch_eligible=false or administrative_pending"))
         return False
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
@@ -2495,8 +2496,7 @@ def _rotate_worker_log(
 
 
 def _module_hermes_argv() -> list[str]:
-    """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
-    console-script target — there is no top-level ``hermes`` package)."""
+    """Interpreter-bound console-script target; there is no top-level hermes package."""
     return [sys.executable, "-m", "hermes_cli.main"]
 
 

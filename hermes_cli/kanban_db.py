@@ -2228,7 +2228,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
         for row in todo_rows:
             task_id = row["id"]
             from hermes_cli.kanban_administrative_hold import administrative_pending
-            if administrative_pending(conn, task_id):
+            from hermes_cli.kanban_completion_workflow import operator_contract_pending
+            if administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
                 continue
             cur_status = row["status"]
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
@@ -2303,7 +2304,8 @@ def _claim_and_open_run(
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
     from hermes_cli.kanban_administrative_hold import administrative_pending
-    if administrative_pending(conn, task_id):
+    from hermes_cli.kanban_completion_workflow import operator_contract_pending
+    if administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
         return None
     cur = conn.execute(
         f"""
