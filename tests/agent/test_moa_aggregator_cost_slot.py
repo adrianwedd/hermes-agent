@@ -73,3 +73,28 @@ def test_create_populates_last_aggregator_slot(moa_config, monkeypatch):
     assert slot["model"] == "anthropic/claude-opus-4.8"
     assert slot["provider"] == "openrouter"
     assert slot["model"] != "closed"
+
+
+def test_last_reference_slots_expose_the_resolved_adviser_routes(moa_config, monkeypatch):
+    """The recorded route receipt reads ``last_reference_slots``: the advisEr routes that
+    ACTUALLY served the fan-out, taken from the same metrics the observability hooks see."""
+    from agent.moa_loop import MoAChatCompletions, MoAClient
+
+    def fake_call_llm(**kwargs):
+        return _response("acted" if kwargs.get("task") != "moa_reference" else "advice")
+
+    monkeypatch.setattr("agent.moa_loop.call_llm", fake_call_llm)
+
+    facade = MoAChatCompletions("closed")
+    assert facade.last_reference_slots == []
+    facade.create(model="closed", messages=[{"role": "user", "content": "clean the db"}])
+
+    assert facade.last_reference_slots == [
+        {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        {"provider": "openrouter", "model": "openai/gpt-5.5"},
+    ]
+    # The OpenAI-client-shaped wrapper delegates it too (that is what turn_usage reads).
+    client = MoAClient("closed")
+    assert client.last_reference_slots == []
+    client.chat.completions._last_reference_metrics = [{"provider": "xai", "model": "grok-4.6"}, {"model": "no-provider"}]
+    assert client.last_reference_slots == [{"provider": "xai", "model": "grok-4.6"}]

@@ -8,9 +8,31 @@ function age(at: number | null | undefined, now = Date.now() / 1000) {
   return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`
 }
 
+// A MoA route whose aggregator or adviser slots were never recorded is NOT the same
+// statement as "this run took no route at all", and neither is the same as "the route is
+// unknown". The launch route names a configured route, so an absent one is Unknown; an
+// absent observed sub-slot is unrecorded evidence about a call that did happen.
+export const NOT_RECORDED = 'not recorded'
+
+/** The `Last observed:` line: the route the run's own calls are recorded as having taken. */
 export function observedRouteLabel(route: RecordedRoute | null | undefined) {
   if (!route) return 'Unknown · no recorded route'
-  if (route.provider === 'moa') return `MoA · aggregator: ${route.aggregator ? `${route.aggregator.provider} / ${route.aggregator.model}` : 'unknown'} · advisers: ${route.advisers?.length ? route.advisers.map(x => `${x.provider} / ${x.model}`).join(', ') : 'unknown'}`
+  if (route.provider === 'moa') {
+    const aggregator = route.aggregator ? `${route.aggregator.provider} / ${route.aggregator.model}` : NOT_RECORDED
+    const advisers = route.advisers?.length ? route.advisers.map(x => `${x.provider} / ${x.model}`).join(', ') : NOT_RECORDED
+    return `MoA · aggregator: ${aggregator} · advisers: ${advisers}`
+  }
+  return `${route.provider} / ${route.model}`
+}
+
+/** The `Launch:` line: the route the run was started on, before any fan-out.
+ *
+ * A launch route never HAS aggregator/adviser slots, so naming them "not recorded" here
+ * would report a missing fact that was never asked for. The MoA preset is the whole answer.
+ */
+export function launchRouteLabel(route: RecordedRoute | null | undefined) {
+  if (!route) return 'Unknown · no recorded route'
+  if (route.provider === 'moa') return `MoA · preset ${route.model}`
   return `${route.provider} / ${route.model}`
 }
 

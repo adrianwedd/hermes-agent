@@ -434,3 +434,63 @@ describe('blocked task detail', () => {
     )
   })
 })
+
+// t_e07ae2d6: the "Launch:" / "Last observed:" lines must report the recorded route and
+// must not print the bare word "unknown" for a route whose sub-slots were never recorded.
+describe('recorded model routes', () => {
+  const withRoutes = (selected: object) => ({
+    ...legacyDetail,
+    attachments: [] as [],
+    task: {
+      ...legacyDetail.task,
+      card_facts: {
+        blocker: null,
+        model: { advisers: [], basis: 'Configured route; observed runtime may differ', primary: 'MoA · openai-codex / gpt-6.1-sol' },
+        progress: null,
+        run_routes: { historical_inference: false, history: [selected], planned_agent: 'implementer', selected }
+      }
+    }
+  })
+
+  it('shows the real aggregator and advisers from the run receipt', async () => {
+    detail = withRoutes({
+      agent: 'implementer',
+      basis: 'Worker-recorded runtime route',
+      launch: { model: 'cloud', provider: 'moa' },
+      last_observed: {
+        advisers: [{ model: 'actor', provider: 'ollama-cloud' }],
+        aggregator: { model: 'gpt-6.1-sol', provider: 'openai-codex' },
+        model: 'cloud',
+        observed_at: 1791274013,
+        provider: 'moa'
+      },
+      run_id: 489,
+      started_at: 1791274013
+    })
+    openDrawer()
+
+    expect(await screen.findByText(/aggregator: openai-codex \/ gpt-6\.1-sol/)).toBeTruthy()
+    expect(screen.getByText(/advisers: ollama-cloud \/ actor/)).toBeTruthy()
+    expect(screen.getByText(/Launch: MoA · preset cloud/)).toBeTruthy()
+    expect(screen.getByText(/Worker-recorded runtime route/)).toBeTruthy()
+    // Only the route line's wording is under test here: a bare "unknown" there is the bug.
+    expect(screen.queryByText(/aggregator: unknown/)).toBeNull()
+    expect(screen.queryByText(/advisers: unknown/)).toBeNull()
+  })
+
+  it('says "not recorded" rather than "unknown" for unrecorded MoA sub-slots', async () => {
+    detail = withRoutes({
+      agent: 'implementer',
+      basis: 'Linked session model-usage receipt; last recorded call, not proof of in-flight route',
+      launch: { model: 'cloud', provider: 'moa' },
+      last_observed: { model: 'cloud', observed_at: 1791274013, provider: 'moa' },
+      run_id: 489,
+      started_at: 1791274013
+    })
+    openDrawer()
+
+    expect(await screen.findByText(/aggregator: not recorded · advisers: not recorded/)).toBeTruthy()
+    // The defect this card was filed for: "unknown" for absent recorded evidence.
+    expect(screen.queryByText(/aggregator: unknown/)).toBeNull()
+  })
+})

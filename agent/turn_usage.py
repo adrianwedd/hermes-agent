@@ -29,6 +29,16 @@ def _agent_session_source(agent: Any) -> str:
     return _session_source_for_agent(getattr(agent, "platform", None))
 
 
+def _is_kanban_worker(agent: Any) -> bool:
+    """True for a dispatcher-spawned Kanban worker turn (the only kind that has a board run).
+
+    Uses the same stripped ``kanban_task_id()`` predicate as the exit-code and turn-recovery
+    gates, so a whitespace-only value cannot read as a worker here and not there.
+    """
+    from agent.kanban_turn_recovery import kanban_task_id  # late: not on the non-worker path
+    return kanban_task_id() is not None
+
+
 @dataclass
 class ResponseUsageOutcome:
     """``compression_attempts`` is the (possibly rearmed-to-zero) budget counter;
@@ -104,6 +114,15 @@ def record_response_usage(
     # OWN model rate and added as dollars below.
     aggregator_usage = canonical_usage
     _moa_client, canonical_usage, _moa_ref_cost = _fold_moa_usage(agent, canonical_usage)
+    # A Kanban worker records the route THIS call actually took (real aggregator + adviser
+    # slots) on its own run, because the route is in-memory only and the board otherwise has
+    # no observed route to show. Best-effort: the receipt must never break a turn.
+    if _is_kanban_worker(agent):
+        try:
+            from hermes_cli.kanban_worker_observability import record_worker_route
+            record_worker_route(agent, _moa_client)
+        except Exception as _route_receipt_exc:  # pragma: no cover - receipt is not accounting
+            logger.debug("Kanban worker route receipt failed: %s", _route_receipt_exc)
     prompt_tokens = canonical_usage.prompt_tokens
     completion_tokens = canonical_usage.output_tokens
     total_tokens = canonical_usage.total_tokens

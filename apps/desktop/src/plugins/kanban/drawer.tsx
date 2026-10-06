@@ -1,6 +1,6 @@
 import { DispatchFacts } from './dispatch-facts'
 import { DeliveryDetails } from './delivery-receipt'
-import { observedRouteLabel } from './card-facts'
+import { launchRouteLabel, observedRouteLabel } from './card-facts'
 /**
  * Task modal — the desktop port of the dashboard's task detail, Linear-style:
  * a centered two-column dialog (main: diagnostics, description, result,
@@ -587,7 +587,7 @@ function RunRoutesSection({ task }: { task: KanbanTask }) {
     {!routes ? <p className="text-xs text-(--ui-text-tertiary)">Awaiting backend update; run route receipts unavailable.</p> : routes.history.length === 0 ? <p className="text-xs">Planned agent: {routes.planned_agent} · no run yet</p> : routes.history.map(run => <div className="mb-3 min-w-0 text-xs [overflow-wrap:anywhere]" key={run.run_id}>
       <p>Run {run.run_id} · agent {run.agent}</p>
       <p>Last observed: {observedRouteLabel(run.last_observed)}{run.last_observed?.observed_at ? ` · ${new Date(run.last_observed.observed_at * 1000).toLocaleString()}` : ''}</p>
-      <p>Launch: {observedRouteLabel(run.launch)}</p>
+      <p>Launch: {launchRouteLabel(run.launch)}</p>
       <p className="text-(--ui-text-tertiary)">{run.basis}</p>
     </div>)}
   </Section>

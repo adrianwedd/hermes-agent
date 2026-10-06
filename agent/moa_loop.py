@@ -1087,6 +1087,23 @@ class MoAChatCompletions:
         """Per-advisor metrics from the most recent fan-out, or None (read-only)."""
         return self._last_reference_metrics
 
+    @property
+    def last_reference_slots(self) -> list[dict[str, Any]]:
+        """Adviser slots from the most recent fan-out as exact ``{provider, model}`` pairs.
+
+        The recorded-route receipt wants the route that ACTUALLY served each adviser, which
+        is what the fan-out resolved (not the configured slot). A metric that never resolved
+        a provider/model is dropped rather than filled in from config.
+        """
+        metrics = self._last_reference_metrics
+        if not isinstance(metrics, list):
+            return []
+        return [
+            {"provider": m["provider"], "model": m["model"]}
+            for m in metrics
+            if isinstance(m, dict) and m.get("provider") and m.get("model")
+        ]
+
     def _record_late_reference_accounting(self, label: str, accounting: Any) -> None:
         """Done-callback for abandoned (still billing) futures: fold their real spend in."""
         if not isinstance(accounting, _RefAccounting):
@@ -1517,6 +1534,10 @@ class MoAClient:
 
     def last_reference_metrics(self) -> Any:
         return self.chat.completions.last_reference_metrics()
+
+    @property
+    def last_reference_slots(self) -> Any:
+        return self.chat.completions.last_reference_slots
 
 
 # Relay table: event -> (primary kwarg, secondary kwarg or None, {cb kwarg: emit kwarg}).
