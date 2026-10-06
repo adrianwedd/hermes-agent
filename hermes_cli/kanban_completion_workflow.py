@@ -21,7 +21,7 @@ def ensure_scope_contract(conn, task_id, *, authority='control_plane'):
         'SELECT title,body,status,current_run_id,worker_pid,claim_lock,created_at FROM tasks WHERE id=?',
         (task_id,),
     ).fetchone()
-    if row is None:
+    if row is None or row[3] is not None or row[4] is not None or row[5] is not None:
         return None, None
     title = str(row[0] or '').strip()
     body = str(row[1] or '').strip()
