@@ -851,9 +851,9 @@ export interface Translations {
     clickToEdit: string;
     clickToEditAssignee: string;
     /** After-creation priority editing — native queue order, not decoration. */
-    editPriority: string;
-    editPriorityHint: string;
-    priorityInvalid: string;
+    editPriority?: string;
+    editPriorityHint?: string;
+    priorityInvalid?: string;
     emptyAssignee: string;
     columnLabels: {
       triage: string;
