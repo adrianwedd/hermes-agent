@@ -199,8 +199,14 @@ def _refuse(conn, task_id, missing, *, expected_snapshot=None):
                 "operator_action_required": True,
             })
         if operator_review_pending:
-            conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=? AND status IN ('ready','running','review','blocked')", (task_id,))
-            kb._append_event(conn, task_id, 'operator_review_handoff', {'automatic_retry': False, 'dispatch_eligible': False})
+            # A worker requesting independent review must remain eligible for
+            # that lane. Only a completed review awaiting operator approval is
+            # parked; existing manual/admin eligibility holds are never lifted.
+            if expected_snapshot[0] == 'review':
+                conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=?", (task_id,))
+                kb._append_event(conn, task_id, 'operator_review_handoff', {'automatic_retry': False, 'dispatch_eligible': False})
+            else:
+                kb._append_event(conn, task_id, 'independent_review_required', {'automatic_implementation_retry': False, 'review_dispatch_allowed_if_eligible': True})
         kb._append_event(
             conn, task_id, "completion_evidence_rejected", {"missing": missing}
         )

@@ -144,3 +144,41 @@ def test_stale_missing_contract_preflight_cannot_park_new_owner(card):
         _refuse(conn, tid, ["Operator must declare requirements"], expected_snapshot=old)
     assert kb.get_task(conn, tid).dispatch_eligible
     assert not operator_contract_pending(conn, tid)
+
+
+@pytest.mark.parametrize("eligible", [True, False])
+def test_worker_review_requirement_preserves_review_admission_and_manual_hold(card, eligible):
+    from hermes_cli.kanban_completion_evidence import (
+        CompletionEvidenceError, _refuse, _snapshot, set_requirements,
+    )
+    conn, tid = card
+    set_requirements(conn, tid, {"version": 1, "kind": "implementation", "local_only": True,
+        "require_review": True, "criteria": ["bounded_source"]},
+        expected_status=kb.get_task(conn, tid).status, expected_assignee=None)
+    kb.recompute_ready(conn)
+    kb.edit_task(conn, tid, dispatch_eligible=eligible)
+    with pytest.raises(CompletionEvidenceError):
+        _refuse(conn, tid, ["Explicit local-only coding still requires approved REVIEW unless its operator contract waives review"],
+            expected_snapshot=_snapshot(conn, tid))
+    assert kb.get_task(conn, tid).dispatch_eligible is eligible
+    assert kb.request_review(conn, tid, summary="Retained source ready for independent review")
+    assert kb.get_task(conn, tid).status == "review"
+    assert (kb.claim_review_task(conn, tid) is not None) is eligible
+
+
+def test_reviewed_code_operator_approval_still_parks_terminal_attempt(card):
+    from hermes_cli.kanban_completion_evidence import (
+        CompletionEvidenceError, _refuse, _snapshot, set_requirements,
+    )
+    conn, tid = card
+    set_requirements(conn, tid, {"version": 1, "kind": "implementation", "local_only": True,
+        "require_review": True, "criteria": ["bounded_source"]},
+        expected_status=kb.get_task(conn, tid).status, expected_assignee=None)
+    kb.recompute_ready(conn)
+    assert kb.request_review(conn, tid, summary="Independent review completed")
+    with pytest.raises(CompletionEvidenceError):
+        _refuse(conn, tid, ["Explicit local-only coding still requires approved REVIEW unless its operator contract waives review"],
+            expected_snapshot=_snapshot(conn, tid))
+    assert not kb.get_task(conn, tid).dispatch_eligible
+    assert kb.claim_review_task(conn, tid) is None
+    assert conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='operator_review_handoff'", (tid,)).fetchone()
