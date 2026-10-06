@@ -110,6 +110,30 @@ def test_explicit_stop_outranks_unfinished_dependency(board):
     assert decision["resume_condition"] == "operator explicitly revokes the stop"
 
 
+def test_substantive_operator_decision_is_not_receipt_administration(board):
+    tid = _task(board, "choose a private connection boundary", status="blocked", eligible=False)
+    _contract(board, tid, selected_next_action={
+        "action": "configure the private connection", "type": "operator_action",
+    })
+    kb._append_event(board, tid, "operator_decision_pending", {
+        "reason": "Private connection authority and secure endpoint are undecided",
+        "resolver": "Adrian",
+        "next_action": "Choose the private connection boundary",
+        "resume_condition": "operator records the authorised boundary",
+    })
+    decision = decide(board, kb.get_task(board, tid))
+    assert decision["workflow_stage"] == "OPERATOR"
+    assert decision["owner"] == "Adrian"
+    assert decision["dispatchable"] is False
+    assert decision.get("administrative_pending") is not True
+
+    kb._append_event(board, tid, "operator_decision_resolved", {"decision": "approved"})
+    board.execute("UPDATE tasks SET status='ready',dispatch_eligible=1 WHERE id=?", (tid,))
+    released = decide(board, kb.get_task(board, tid))
+    assert released["workflow_stage"] == "READY"
+    assert released["dispatchable"] is True
+
+
 def test_t_e5d24de5_review_flag_and_claim_guard_cannot_disagree(board):
     tid = _task(board, "dashboard review", status="review", eligible=False)
     _contract(board, tid)

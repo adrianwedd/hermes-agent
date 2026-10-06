@@ -182,6 +182,15 @@ def dependencies_satisfied(conn, task_id: str) -> bool:
     return all(item["satisfied"] for item in _dependency_state(conn, task_id))
 
 
+def _operator_decision_pending(conn, task_id: str) -> dict[str, Any] | None:
+    row = _latest_event(conn, task_id, (
+        "operator_decision_pending", "operator_decision_resolved",
+    ))
+    if row is None or row[1] != "operator_decision_pending":
+        return None
+    return _json(row[2])
+
+
 def _execution_health(conn, task_id: str) -> dict[str, Any]:
     try:
         row = conn.execute(
@@ -263,6 +272,7 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
     authority_row = _latest_event(conn, task_id, (
         "operator_authority_granted", "operator_authority_revoked",
         "operator_dispatch_release", "administrative_pending", "administrative_pending_released",
+        "operator_decision_pending", "operator_decision_resolved",
     ))
     authority_revision = authority_row[0] if authority_row else None
     selected = contract.get("selected_next_action")
@@ -315,6 +325,15 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
             reason="Operator explicit stop remains in force",
             owner="operator", next_action="Preserve the stopped state",
             resume_condition="operator explicitly revokes the stop",
+        )
+    elif operator_decision := _operator_decision_pending(conn, task_id):
+        decision.update(
+            workflow_stage="OPERATOR",
+            reason=operator_decision.get("reason") or "A substantive operator decision remains",
+            owner=operator_decision.get("resolver") or "operator",
+            next_action=operator_decision.get("next_action") or "Resolve the named operator decision",
+            resume_condition=operator_decision.get("resume_condition") or
+            "operator records the decision",
         )
     elif health["state"] == "INFRASTRUCTURE_FAULT" and status in {"ready", "review"}:
         semantic = "REVIEW" if status == "review" else "READY"
