@@ -2594,13 +2594,6 @@ def _set_relay_auxiliary_route(provider: str | None, model: str | None, api_mode
     context["api_mode"] = str(api_mode or "chat_completions")
 
 
-def _record_route_info(
-    route_info: Optional[Dict[str, str]], provider: Optional[str], model: Optional[str]
-) -> None:
-    """Expose the concrete route selected for one auxiliary call."""
-    if route_info is not None:
-        route_info["provider"] = provider or "auto"
-        route_info["model"] = model or "default"
 
 
 def _relay_auxiliary_metadata(
@@ -2620,6 +2613,9 @@ def _relay_auxiliary_metadata(
         "retry_count": attempt_count,
         "auxiliary_task": str(context["task"]),
     }
+
+
+from agent.auxiliary_relay_metadata import _record_route_info, _relay_completion_metadata
 
 
 def _relay_sync_completion(
@@ -2643,6 +2639,7 @@ def _relay_sync_completion(
     if route is None:
         return _run_protected_sync_provider_call(callback, kwargs)
     provider_name, fallback_model, metadata = route
+    relay_metadata = _relay_completion_metadata(client, metadata)
     from agent import relay_llm
     from agent.auxiliary_hooks import run_with_aux_hooks
     model_name = str(kwargs.get("model") or fallback_model)
@@ -2650,7 +2647,7 @@ def _relay_sync_completion(
         return run_with_aux_hooks(
             lambda: relay_llm.execute_current(
                 kwargs, lambda request: _run_protected_sync_provider_call(callback, request),
-                name=provider_name, model_name=model_name, metadata=metadata,
+                name=provider_name, model_name=model_name, metadata=relay_metadata,
                 defer_logical_completion=True,
             ),
             aux_task=str(metadata.get("auxiliary_task") or ""), metadata=metadata, client=client, kwargs=kwargs,
@@ -2674,6 +2671,7 @@ async def _relay_async_completion(
     if route is None:
         return await callback(kwargs)
     provider_name, fallback_model, metadata = route
+    relay_metadata = _relay_completion_metadata(client, metadata)
     from agent import relay_llm
     from agent.auxiliary_hooks import arun_with_aux_hooks
     model_name = str(kwargs.get("model") or fallback_model)
@@ -2681,7 +2679,7 @@ async def _relay_async_completion(
         return await arun_with_aux_hooks(
             lambda: relay_llm.execute_current_async(
                 kwargs, callback, name=provider_name, model_name=model_name,
-                metadata=metadata, defer_logical_completion=True,
+                metadata=relay_metadata, defer_logical_completion=True,
             ),
             aux_task=str(metadata.get("auxiliary_task") or ""), metadata=metadata, client=client, kwargs=kwargs,
             provider=provider_name, model=model_name, api_mode=str(metadata.get("api_mode") or ""),
@@ -2704,13 +2702,14 @@ def _relay_sync_stream(
     if route is None:
         return create(kwargs)
     provider_name, fallback_model, metadata = route
+    relay_metadata = _relay_completion_metadata(client, metadata)
     from agent import relay_llm
     from agent.auxiliary_hooks import run_with_aux_hooks
     model_name = str(kwargs.get("model") or fallback_model)
     return run_with_aux_hooks(
         lambda: relay_llm.stream_current(
             kwargs, create, name=provider_name, model_name=model_name, finalizer=dict,
-            metadata=metadata, completed_response_predicate=lambda value: hasattr(value, "choices"),
+            metadata=relay_metadata, completed_response_predicate=lambda value: hasattr(value, "choices"),
         ),
         aux_task=str(metadata.get("auxiliary_task") or ""), metadata=metadata, client=client, kwargs=kwargs,
         provider=provider_name, model=model_name, api_mode=str(metadata.get("api_mode") or ""), streaming=True,

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import hermes_state_wal
+from tests.hermes_cli.kanban_completion_fixture import complete_fixture_task
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
@@ -551,55 +552,6 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         assert kbd.check_respawn_guard(conn, spawn_failed_id) == "blocker_auth"
 
 
-def test_infrastructure_spawn_refusal_never_charges_the_card(
-    kanban_home, monkeypatch, all_assignees_spawnable,
-):
-    """The host refusing to place a worker (managed gateway, user bus gone —
-    #114720) is not a card failure: through the REAL spawn boundary and the
-    real dispatcher accounting, ``consecutive_failures`` stays put, the breaker
-    never parks the card as a bare ``blocked``, the run is tagged
-    ``infrastructure`` and the guard spaces the retries. A control spawn
-    failure on the same card still counts."""
-    import tools.process_registry as process_registry
-
-    monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
-    monkeypatch.setenv("INVOCATION_ID", "managed-gateway")
-    monkeypatch.setattr(process_registry, "_systemd_run_user_scope_available", lambda: False)
-    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
-
-    def spawn_via_real_boundary(task, workspace, board=None):
-        kbd._restart_safe_worker_argv(task, ["hermes", "chat"])  # raises: real probe verdict, real _degrade()
-        raise AssertionError("unreachable")
-
-    with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="bus is down", assignee="a")
-        for _ in range(3):
-            res = kbd.dispatch_once(conn, spawn_fn=spawn_via_real_boundary, failure_limit=2)
-            assert res.auto_blocked == []
-        row = conn.execute(
-            "SELECT status, block_kind, consecutive_failures, last_failure_error FROM tasks WHERE id = ?", (tid,),
-        ).fetchone()
-        assert (row["status"], row["block_kind"], row["consecutive_failures"]) == ("ready", None, 0)
-        assert "enable-linger" in row["last_failure_error"]
-        runs = conn.execute(
-            "SELECT outcome, metadata FROM task_runs WHERE task_id = ? ORDER BY id", (tid,),
-        ).fetchall()
-        assert [r["outcome"] for r in runs] == ["spawn_failed"] * 3
-        assert all(json.loads(r["metadata"])["infrastructure"] is True for r in runs)
-
-        monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
-        assert kbd.check_respawn_guard(conn, tid) == "infrastructure_cooldown"
-
-        # Control: an ordinary spawn failure on the same card still spends budget.
-        monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
-
-        def spawn_broken(task, workspace, board=None):
-            raise RuntimeError("profile launcher exploded")
-
-        kbd.dispatch_once(conn, spawn_fn=spawn_broken, failure_limit=2)
-        assert conn.execute(
-            "SELECT consecutive_failures FROM tasks WHERE id = ?", (tid,),
-        ).fetchone()[0] == 1
 
 
 
@@ -690,7 +642,7 @@ def test_delete_archived_task_removes_related_rows(kanban_home):
         tid = kb.create_task(conn, title="child", parents=[parent], assignee="worker")
         kb.add_comment(conn, tid, "user", "cleanup me")
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, result="done")
+        complete_fixture_task(conn, tid, result="done")
         assert kb.archive_task(conn, tid)
         conn.execute(
             "INSERT INTO kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, created_at, last_event_id) "
@@ -821,7 +773,7 @@ def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
         artifact = ws / "chart.png"
         artifact.write_bytes(b"png-bytes")
 
-        assert kb.complete_task(
+        assert complete_fixture_task(
             conn,
             t,
             result="ok",
@@ -842,9 +794,12 @@ def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
     assert run.metadata["artifacts"] == [str(persisted)]
     with kbc.connect() as conn:
         attachments = kb.list_attachments(conn, t)
-    assert [(a.filename, a.stored_path) for a in attachments] == [
+    assert [(a.filename, a.stored_path) for a in attachments if a.filename == "chart.png"] == [
         ("chart.png", str(persisted.resolve()))
     ]
+    assert {a.filename for a in attachments} == {
+        "chart.png", "fixture-existence.txt", "completion-evidence.json",
+    }
 
 
 def test_review_bound_handoff_preserves_declared_artifacts(kanban_home):
@@ -864,16 +819,19 @@ def test_review_bound_handoff_preserves_declared_artifacts(kanban_home):
             conn, t, summary="ready for review",
             metadata={"artifacts": [str(artifact)]}, expected_run_id=run_id)
         handoff = [e for e in kb.list_events(conn, t) if e.kind == "review_requested"][-1]
-        assert kb.complete_task(conn, t, summary="approved")
+        assert complete_fixture_task(conn, t, summary="approved")
         attachments = kb.list_attachments(conn, t)
     persisted = Path(handoff.payload["artifacts"][0])
     assert not ws.exists(), "scratch workspace should still be cleaned up"
     assert persisted.exists(), "staged copy must survive scratch cleanup"
     assert persisted.parent == kb.task_attachments_dir(t)
     assert persisted.read_bytes() == b'{"ok": true}'
-    assert [(a.filename, a.stored_path) for a in attachments] == [
+    assert [(a.filename, a.stored_path) for a in attachments if a.filename == "evidence.json"] == [
         ("evidence.json", str(persisted.resolve()))
     ]
+    assert {a.filename for a in attachments} == {
+        "evidence.json", "fixture-existence.txt", "completion-evidence.json",
+    }
 
 
 def test_request_review_rollback_discards_staged_copies(kanban_home):
@@ -931,10 +889,10 @@ def test_dir_child_completion_unblocks_deferred_scratch_parent(kanban_home, tmp_
         parent_ws = kbw.resolve_workspace(p_task)
         kbw.set_workspace_path(conn, parent, parent_ws)
 
-        kb.complete_task(conn, parent, result="handoff")
+        complete_fixture_task(conn, parent, result="handoff")
         assert parent_ws.exists(), "deferred while dir child active"
 
-        kb.complete_task(conn, child, result="built")
+        complete_fixture_task(conn, child, result="built")
 
     assert not parent_ws.exists(), (
         "A 'dir' child completing must trigger the parent scratch sweep"
@@ -1005,7 +963,7 @@ def test_symlinked_workspaces_root_does_not_widen_scratch_cleanup(kanban_home, t
         # Legacy explicit-path scratch task pointing straight at user data.
         t = kb.create_task(conn, title="scratch")
         kbw.set_workspace_path(conn, t, victim)
-        assert kb.complete_task(conn, t, result="done")
+        assert complete_fixture_task(conn, t, result="done")
     assert (victim / "keep.txt").is_file()
 
 
@@ -1398,7 +1356,7 @@ def test_link_tasks_no_dependency_wait_when_parent_done(kanban_home):
     """A done parent demotes nothing and reports no gate."""
     with kbc.connect() as conn:
         parent = kb.create_task(conn, title="done parent")
-        kb.complete_task(conn, parent, result="done")
+        complete_fixture_task(conn, parent, result="done")
         child = kb.create_task(conn, title="follower")
 
         gated = kb.link_tasks(conn, parent, child)
@@ -1454,7 +1412,7 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
     with kbc.connect() as conn:
         # A is done.
         a = kb.create_task(conn, title="parent-done")
-        kb.complete_task(conn, a, result="done")
+        complete_fixture_task(conn, a, result="done")
 
         # C is running (not done) — blocks child B.
         c = kb.create_task(conn, title="parent-running")

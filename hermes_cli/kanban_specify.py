@@ -127,6 +127,12 @@ def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
     """``(task, "")`` when the task exists and is in triage, else ``(None, reason)``."""
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
+        from hermes_cli.kanban_administrative_hold import administrative_pending
+        if task is not None and (not task.dispatch_eligible or administrative_pending(conn, task_id)):
+            return None, "dispatch eligibility or administrative receipt hold; automatic specification cannot admit this card"
+        from hermes_cli.kanban_completion_workflow import operator_contract_pending
+        if task is not None and operator_contract_pending(conn, task_id):
+            return None, "operator completion declaration required; automatic specification cannot repair it"
     if task is None:
         return None, "unknown task id"
     if task.status != "triage":
