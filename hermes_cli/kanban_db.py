@@ -1198,6 +1198,57 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _normalize_workspace_path(path: Optional[Any]) -> Optional[str]:
+    """Whitespace-only / blank paths are *no* path; anything else is kept verbatim.
+
+    ``workspace_path`` is nullable TEXT: ``""`` and ``"   "`` are the same
+    absence as ``NULL`` to every reader (SQLite's ``workspace_path IS ?``
+    guards, ``kanban_db_workspace.resolve_workspace``, the dashboard). Storing
+    one anyway is what made the historical ``dir`` + empty-path pair possible,
+    so the create boundary folds a *blank* value to ``None``.
+
+    A non-blank path is returned **unmodified**: POSIX directory names may
+    legitimately begin or end with a space, so stripping a real path would
+    silently retarget the workspace. Non-string input is rejected rather than
+    coerced — ``str(obj)`` would turn a bad type into a plausible-looking path.
+    """
+    if path is None:
+        return None
+    if not isinstance(path, str):
+        raise ValueError(f"workspace_path must be a string or None, got {type(path).__name__}")
+    return path if path.strip() else None
+
+
+def _validate_workspace_pair(workspace_kind: str, workspace_path: Optional[str]) -> None:
+    """The central workspace invariant, enforced for every supported writer.
+
+    ``workspace_kind == "dir"`` -> a non-empty ``workspace_path`` is required.
+
+    Rejection, not defaulting: ``dir`` is the only kind whose whole meaning is
+    "the caller picked this exact existing directory" (see the workspace kinds
+    in ``website/docs/user-guide/features/kanban.md``). Hermes has no documented
+    default directory, so inventing one — or quietly downgrading the kind to
+    ``scratch``, whose workspace is *deleted on completion* — would silently
+    change where a worker operates and what gets cleaned up. Callers that want
+    an ephemeral workspace must say ``scratch``.
+
+    This is deliberately here, in the DB layer, rather than at each caller:
+    every supported write path (CLI ``kanban create``, the ``kanban_create``
+    tool, the dashboard ``POST /tasks``, decomposition fan-out) funnels through
+    ``create_task``, and requeue/reclaim paths never rewrite the pair. The
+    dispatcher's ``resolve_workspace`` refusal stays as the fail-safe for rows
+    that predate this check; it is no longer the only place the pair is judged.
+    """
+    if workspace_kind == "dir" and not workspace_path:
+        raise ValueError(
+            "workspace_kind 'dir' requires an absolute workspace_path "
+            "(use 'dir:<path>' / workspace_path=...): a 'dir' workspace is a "
+            "shared directory that is preserved on completion, so it cannot be "
+            "inferred. Pass 'scratch' for a disposable per-task workspace, or "
+            "'worktree' for a git worktree."
+        )
+
+
 def _resolve_project_link(
     conn: sqlite3.Connection, project_id: Optional[str], project_source_task_id: Optional[str],
     workspace_kind: str, workspace_path: Optional[str],
@@ -1381,6 +1432,7 @@ def create_task(
             f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
             f"got {workspace_kind!r}"
         )
+    workspace_path = _normalize_workspace_path(workspace_path)
     if branch_name is not None:
         branch_name = str(branch_name).strip() or None
     if branch_name and workspace_kind != "worktree":
@@ -1389,6 +1441,10 @@ def create_task(
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
+    # Invariant check AFTER the project link resolves: a scratch request on a
+    # project-scoped board is upgraded to a worktree there, and its path is
+    # materialised below, so the pair that gets persisted is what must hold.
+    _validate_workspace_pair(workspace_kind, workspace_path)
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 

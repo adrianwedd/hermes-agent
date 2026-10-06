@@ -182,18 +182,29 @@ def _insert_decomposed_child(
     """
     from hermes_cli.kanban_db import (
         _new_task_id, _canonical_assignee, _append_event,
+        _normalize_workspace_path, _validate_workspace_pair,
     )
 
     root_ws_kind = root_row["workspace_kind"] or "scratch"
     child_ws_kind = child.get("workspace_kind") or root_ws_kind
     if child.get("workspace_path"):
-        child_ws_path = child.get("workspace_path")
+        child_ws_path = _normalize_workspace_path(child.get("workspace_path"))
     elif child_ws_kind == "worktree":
         child_ws_path = None
     elif child_ws_kind == root_ws_kind:
-        child_ws_path = root_row["workspace_path"]
+        child_ws_path = _normalize_workspace_path(root_row["workspace_path"])
     else:
         child_ws_path = None
+    # Decomposition is a supported write path: a child asking for a 'dir'
+    # workspace must name one. The inherited path is only ever a real path when
+    # the kinds match, so a 'dir' child under a scratch root used to fall
+    # through to the exact invalid pair (#t_cce56238 shape). Reject, do not
+    # invent: the fan-out is atomic, so the whole decomposition is refused and
+    # the root stays in triage for the caller to correct.
+    try:
+        _validate_workspace_pair(child_ws_kind, child_ws_path)
+    except ValueError as exc:
+        raise ValueError(f"child[{child.get('title')!r}]: {exc}") from None
     new_id = _new_task_id()
     body = child.get("body")
     conn.execute(
