@@ -16,7 +16,7 @@ type KanbanMessages = {
   newTaskCommand: string
   countTip: (running: number, ready: number) => string
   col: Record<
-    'archived' | 'blocked' | 'done' | 'ready' | 'review' | 'running' | 'scheduled' | 'todo' | 'triage',
+    'archived' | 'blocked' | 'done' | 'execution' | 'ready' | 'review' | 'running' | 'scheduled' | 'todo' | 'triage',
     { label: string; help: string }
   >
   locked: { review: string; running: string; scheduled: string }
@@ -240,6 +240,7 @@ export const en: KanbanMessages = {
     scheduled: { label: 'Scheduled', help: 'Waiting for a scheduled time to arrive.' },
     ready: { label: 'Ready', help: 'Dependencies satisfied — assign a profile and the dispatcher runs it.' },
     running: { label: 'Running', help: 'Claimed by a worker — an agent is on it. Set by the dispatcher.' },
+    execution: { label: 'Environment', help: 'The work remains valid, but the shared execution environment must recover.' },
     blocked: { label: 'Blocked', help: 'The worker asked for human input.' },
     review: { label: 'Review', help: 'A review agent is checking the work. Set by the dispatcher.' },
     done: { label: 'Done', help: 'Completed; dependent children become ready.' },
@@ -472,6 +473,7 @@ const ja: KanbanMessages = {
     scheduled: { label: 'スケジュール', help: '予定時刻を待っています。' },
     ready: { label: 'Ready', help: '依存関係が解決済み — プロフィールを割り当てるとディスパッチャが実行します。' },
     running: { label: '実行中', help: 'ワーカーが取得済み — エージェントが作業中。ディスパッチャが設定します。' },
+    execution: { label: '実行環境', help: '作業は有効ですが、共有実行環境の復旧を待っています。' },
     blocked: { label: 'ブロック', help: 'ワーカーが人間の入力を求めています。' },
     review: { label: 'レビュー', help: 'レビューエージェントが作業を確認中。ディスパッチャが設定します。' },
     done: { label: '完了', help: '完了。依存する子タスクが Ready になります。' },
@@ -703,6 +705,7 @@ const zh: KanbanMessages = {
     scheduled: { label: '已排期', help: '等待预定时间到来。' },
     ready: { label: '就绪', help: '依赖已满足 — 分配一个配置档，调度器即会运行它。' },
     running: { label: '运行中', help: '已被工作单元领取 — 有代理在处理。由调度器设置。' },
+    execution: { label: '执行环境', help: '工作仍然有效，但正在等待共享执行环境恢复。' },
     blocked: { label: '受阻', help: '工作单元需要人工输入。' },
     review: { label: '审查', help: '审查代理正在检查工作。由调度器设置。' },
     done: { label: '完成', help: '已完成；依赖它的子任务变为就绪。' },
@@ -931,6 +934,7 @@ const zhHant: KanbanMessages = {
     scheduled: { label: '已排程', help: '等待預定時間到來。' },
     ready: { label: '就緒', help: '相依項目已滿足 — 指派一個設定檔，排程器便會執行它。' },
     running: { label: '執行中', help: '已被工作單元領取 — 有代理在處理。由排程器設定。' },
+    execution: { label: '執行環境', help: '工作仍然有效，但正在等待共享執行環境恢復。' },
     blocked: { label: '受阻', help: '工作單元需要人工輸入。' },
     review: { label: '審查', help: '審查代理正在檢查工作。由排程器設定。' },
     done: { label: '完成', help: '已完成；相依它的子任務變為就緒。' },

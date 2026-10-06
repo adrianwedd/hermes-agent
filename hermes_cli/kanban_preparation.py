@@ -7,9 +7,11 @@ existing inclusive host admission budget after a genuinely ready promotion.
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sqlite3
 import re
+import tempfile
 from pathlib import Path
 
 _FIELDS = ('id,title,body,status,assignee,workspace_kind,workspace_path,project_id,'
@@ -114,6 +116,53 @@ def grant_error(grant):
     return ''
 
 
+def provision_authorised_workspace(grant):
+    """Create the exact isolated checkout already authorised by the grant.
+
+    No inference is permitted: remote, immutable revision, destination and the
+    explicit provisioning grant must all be present. Existing paths are never
+    overwritten or repaired here.
+    """
+    if not isinstance(grant, dict) or grant.get('provision_missing_workspace') is not True:
+        return False, 'workspace_provision_not_authorised'
+    remote = grant.get('canonical_remote')
+    revision = grant.get('source_revision')
+    raw_path = grant.get('workspace_path')
+    if not all(isinstance(value, str) and value.strip() for value in (remote, revision, raw_path)):
+        return False, 'workspace_provision_identity_incomplete'
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute() or path.exists():
+        return False, 'workspace_destination_not_new'
+    if grant.get('isolated_workspace') is not True:
+        return False, 'isolated_workspace_required'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(prefix='.hermes-preparation-', dir=path.parent))
+    checkout = staging_root / 'checkout'
+    try:
+        subprocess.run(
+            ['git', 'clone', '--no-checkout', '--', remote, str(checkout)],
+            check=True, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        subprocess.run(
+            ['git', '-C', str(checkout), 'checkout', '--detach', revision],
+            check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        head = subprocess.check_output(
+            ['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True, timeout=10,
+        ).strip()
+        origin = subprocess.check_output(
+            ['git', '-C', str(checkout), 'remote', 'get-url', 'origin'], text=True, timeout=10,
+        ).strip()
+        if head != revision or origin != remote:
+            return False, 'provisioned_workspace_identity_mismatch'
+        checkout.rename(path)
+    except (OSError, subprocess.SubprocessError):
+        return False, 'workspace_provision_failed'
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+    return True, ''
+
+
 def refusal(conn, task, contract, grant, facts):
     from hermes_cli.kanban_administrative_hold import administrative_pending
     if task['status'] != 'todo':
@@ -176,10 +225,24 @@ def _prepare_task_locked(conn, task_id, *, facts_loader=runtime_facts):
         return {'task_id': task_id, 'prepared': False, 'reason': error, 'contract_event': cid}
     empty_facts = dict(project_exists=False, profile_exists=False, lane='unknown',
                        workspace_exists=False, source_matches=False, workspace_busy=False)
-    reason = refusal(conn, task, contract, grant, empty_facts)
-    # Stop/scope/authority checks precede profile, project and workspace reads.
-    if reason in {'project_unresolved'}:
-        reason = refusal(conn, task, contract, grant, facts_loader(conn, task, grant))
+    preflight = refusal(conn, task, contract, grant, empty_facts)
+    if preflight not in {'project_unresolved', 'profile_unresolved',
+                         'isolated_source_workspace_unqualified'}:
+        return {
+            'task_id': task_id, 'prepared': False, 'reason': preflight,
+            'contract_event': cid, 'scope_digest': task['scope_digest'],
+        }
+    facts = facts_loader(conn, task, grant)
+    provisioned = False
+    if not facts['workspace_exists'] and grant.get('provision_missing_workspace') is True:
+        provisioned, provision_reason = provision_authorised_workspace(grant)
+        if not provisioned:
+            return {
+                'task_id': task_id, 'prepared': False, 'reason': provision_reason,
+                'contract_event': cid, 'scope_digest': task['scope_digest'],
+            }
+        facts = facts_loader(conn, task, grant)
+    reason = refusal(conn, task, contract, grant, facts)
     outcome = {'task_id': task_id, 'prepared': False, 'reason': reason, 'contract_event': cid,
                'scope_digest': task['scope_digest']}
     if reason:
@@ -214,6 +277,9 @@ def _prepare_task_locked(conn, task_id, *, facts_loader=runtime_facts):
             'source_contract_event': cid, 'qualified_contract_event': qualified_cid,
             'scope_digest': task['scope_digest'], 'lane': 'cloud', 'models_called': 0,
             'owner': 'bounded_existing_controller', 'workspace_path': grant['workspace_path'],
+            'workspace_provisioned': provisioned,
+            'source_revision': grant['source_revision'],
+            'canonical_remote': grant.get('canonical_remote'),
         })
         outcome.update(prepared=True, reason='', qualified_contract_event=qualified_cid)
     # The shared native readiness path, not a second scheduler, owns promotion.

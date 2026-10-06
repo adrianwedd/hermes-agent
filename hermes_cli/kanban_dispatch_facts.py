@@ -14,7 +14,10 @@ STAGE_COLUMNS = {
 
 def board_column(stage, status):
     if stage == "WAITING":
-        return status
+        # The existing Scheduled lane is the board's non-dispatchable known-
+        # wake-condition lane. Never leak a stale raw ``ready`` status into the
+        # Ready column while the canonical claim guard says WAITING.
+        return "scheduled"
     return STAGE_COLUMNS.get(stage, status)
 
 
@@ -58,7 +61,10 @@ def dispatch_facts(conn, task):
         "terminal": stage in {"DONE", "SUPERSEDED"},
         "stage": stage,
         "dispatchable": decision["dispatchable"],
-        "column": board_column(stage, status),
+        "column": (
+            "execution" if decision["execution_health"]["state"] == "INFRASTRUCTURE_FAULT"
+            else board_column(stage, status)
+        ),
         "label": label,
         "reason": reason,
         "owner": decision["owner"],

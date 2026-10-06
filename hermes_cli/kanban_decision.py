@@ -21,6 +21,39 @@ INFRA_ERROR_MARKERS = (
 )
 
 
+def infrastructure_error(error: str) -> bool:
+    lowered = str(error or "").lower()
+    return any(marker in lowered for marker in INFRA_ERROR_MARKERS)
+
+
+def environment_fingerprint() -> dict[str, Any]:
+    """Current install dependency identity, read without repairing or mutating it."""
+    try:
+        from pm.environments import committed_venv, runtime_facts_path
+        from pm.paths import install_root
+
+        root = install_root().resolve()
+        facts = runtime_facts_path(root)
+        environment = committed_venv(root)
+        payload = facts.read_bytes() if facts.is_file() else b""
+        identity = hashlib.sha256(
+            str(root).encode() + b"\0" + payload + b"\0" +
+            str(environment or "").encode()
+        ).hexdigest()
+        return {
+            "identity": identity,
+            "healthy": bool(environment and (environment / "pyvenv.cfg").is_file()),
+            "install_root": str(root),
+            "environment": str(environment) if environment else None,
+        }
+    except Exception as exc:
+        return {
+            "identity": hashlib.sha256(str(exc).encode()).hexdigest(),
+            "healthy": False,
+            "reason": str(exc),
+        }
+
+
 def _mapping(task: Any) -> dict[str, Any]:
     if isinstance(task, Mapping):
         return dict(task)
@@ -80,20 +113,64 @@ def _dependency_state(conn, task_id: str) -> list[dict[str, Any]]:
         payload = _json(declared[1]) if declared else {}
         requirement_id = str(payload.get("requirement_id") or f"legacy:{parent_id}:terminal")
         accepted = conn.execute(
-            "SELECT id FROM task_events WHERE task_id=? "
+            "SELECT id,payload FROM task_events WHERE task_id=? "
             "AND kind='dependency_requirement_satisfied' AND json_valid(payload) "
-            "AND json_extract(payload,'$.requirement_id')=? ORDER BY id DESC LIMIT 1",
-            (task_id, requirement_id),
+            "AND json_extract(payload,'$.requirement_id')=? AND id>? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, requirement_id, int(declared[0]) if declared else 0),
         ).fetchone()
-        satisfied = bool(accepted) or (not declared and status in TERMINAL_STATUSES)
+        accepted_payload = _json(accepted[1]) if accepted else {}
+        expected_identity = payload.get("evidence_identity")
+        accepted_identity = accepted_payload.get("evidence_identity")
+        identity_matches = (
+            not expected_identity or accepted_identity == expected_identity
+        )
+        satisfied = bool(accepted and identity_matches) or (
+            not declared and status in TERMINAL_STATUSES
+        )
         result.append({
             "parent_id": parent_id,
             "requirement_id": requirement_id,
+            "declaration_event_id": int(declared[0]) if declared else None,
             "requirement": payload.get("requirement") or "parent terminal (legacy edge)",
             "evidence_identity": payload.get("evidence_identity"),
             "satisfied": satisfied,
             "parent_status": status,
         })
+    return result
+
+
+def _external_condition_state(
+    conn, task_id: str, contract_event_id: int | None, contract: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Resolve declared external conditions against evidence newer than the contract.
+
+    A declaration revision invalidates older satisfaction evidence.  Conditions
+    without an explicit ``satisfied`` value fail closed until a matching
+    ``external_condition_satisfied`` event is recorded.
+    """
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(contract.get("external_conditions") or []):
+        condition = dict(raw) if isinstance(raw, dict) else {"requirement": str(raw)}
+        condition_id = str(condition.get("condition_id") or condition.get("id") or f"condition-{index + 1}")
+        event = conn.execute(
+            "SELECT id,payload FROM task_events WHERE task_id=? "
+            "AND kind='external_condition_satisfied' AND id>? AND json_valid(payload) "
+            "AND json_extract(payload,'$.condition_id')=? ORDER BY id DESC LIMIT 1",
+            (task_id, int(contract_event_id or 0), condition_id),
+        ).fetchone()
+        evidence = _json(event[1]) if event else {}
+        expected_identity = condition.get("evidence_identity")
+        satisfied = condition.get("satisfied") is True or bool(
+            event and (not expected_identity or evidence.get("evidence_identity") == expected_identity)
+        )
+        condition.update(
+            condition_id=condition_id,
+            declaration_event_id=contract_event_id,
+            satisfaction_event_id=int(event[0]) if event else None,
+            satisfied=satisfied,
+        )
+        result.append(condition)
     return result
 
 
@@ -112,11 +189,26 @@ def _execution_health(conn, task_id: str) -> dict[str, Any]:
     if row is None:
         return {"state": "UNKNOWN", "reason": None, "retry_after": None}
     error = str(row[3] or "")
-    lowered = error.lower()
-    if any(marker in lowered for marker in INFRA_ERROR_MARKERS):
+    if infrastructure_error(error):
+        current = environment_fingerprint()
+        metadata_row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (row[0],),
+        ).fetchone()
+        metadata = _json(metadata_row[0]) if metadata_row else {}
+        failed_identity = metadata.get("environment_fingerprint")
+        if current.get("healthy") and (
+            failed_identity is None or failed_identity != current.get("identity")
+        ):
+            return {
+                "state": "HEALTHY", "run_id": row[0],
+                "reason": "Execution environment recovered after the recorded infrastructure fault",
+                "retry_after": None, "environment_fingerprint": current,
+                "recovered_from": error,
+            }
         return {
             "state": "INFRASTRUCTURE_FAULT", "run_id": row[0], "reason": error,
             "retry_after": "environment_fingerprint_changes", "semantic_stage_unchanged": True,
+            "environment_fingerprint": current,
         }
     if row[1] == "running":
         return {"state": "ACTIVE", "run_id": row[0], "reason": None, "retry_after": None}
@@ -143,13 +235,15 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
     contract_event_id, contract = _contract(conn, task_id)
     dependencies = _dependency_state(conn, task_id)
     unsatisfied = [d for d in dependencies if not d["satisfied"]]
+    external_conditions = _external_condition_state(conn, task_id, contract_event_id, contract)
+    unmet_external = [item for item in external_conditions if not item["satisfied"]]
     health = _execution_health(conn, task_id)
     accepted = list(contract.get("accepted_completed_actions") or [])
     remaining = list(contract.get("remaining_required_actions") or [])
     evidence_rows = conn.execute(
         "SELECT id,kind,payload FROM task_events WHERE task_id=? AND kind IN ("
         "'completion_evidence_accepted','review_approved','completed',"
-        "'dependency_requirement_satisfied','preparation_qualified') ORDER BY id",
+        "'dependency_requirement_satisfied') ORDER BY id",
         (task_id,),
     ).fetchall()
     evidence_identities = [
@@ -167,6 +261,16 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
     selected = contract.get("selected_next_action")
     if not isinstance(selected, dict):
         selected = {}
+    if contract_event_id is None and str(t.get("title") or "").strip():
+        # Pre-contract legacy cards still carry one authoritative bounded scope:
+        # their title/body. Deriving that exact action preserves old boards
+        # without inventing generic work from nonterminal status. Once a native
+        # contract exists, omission of selected_next_action fails closed.
+        selected = {
+            "action": str(t.get("title")).strip(),
+            "type": "legacy_authoritative_scope",
+            "required_authority": None,
+        }
     decision: dict[str, Any] = {
         "task_id": task_id, "native_status": status,
         "accepted_completed_actions": accepted,
@@ -177,7 +281,7 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
         "worker_executable_now": False,
         "required_authority": selected.get("required_authority"),
         "dependency_requirements": dependencies,
-        "external_conditions": list(contract.get("external_conditions") or []),
+        "external_conditions": external_conditions,
         "current_owner": t.get("assignee"),
         "workflow_stage": "HELD", "dispatchable": False,
         "next_action": None, "owner": None,
@@ -238,6 +342,19 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
         decision.update(workflow_stage="WAITING", reason=f"Unsatisfied dependency requirement: {names}",
                         owner="dependency resolver", next_action="Satisfy the named requirement",
                         resume_condition="accepted evidence satisfies each named requirement")
+    elif unmet_external:
+        condition = unmet_external[0]
+        action = condition.get("action") or selected.get("action") or "Wait for the named external condition"
+        decision.update(
+            workflow_stage="WAITING",
+            reason=condition.get("requirement") or f"External condition {condition['condition_id']} is not satisfied",
+            owner=condition.get("resolver") or selected.get("resolver") or "external resolver",
+            next_action=action,
+            current_next_action=action,
+            current_next_action_type=condition.get("type") or selected.get("type") or "external_condition",
+            resume_condition=condition.get("resume_condition") or selected.get("resume_condition") or
+            f"external condition {condition['condition_id']} is satisfied",
+        )
     else:
         explicitly_unqualified = contract.get("qualified_for_dispatch") is False
         guarded_contract = (
@@ -328,27 +445,58 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
                                 resume_condition="dispatch eligibility changes")
                 decision["invariant_violations"].append(
                     "REVIEW advertised runnable but claim rejects")
-        elif status in ("ready", "todo") and eligible:
-            action = selected.get("action") or "Execute the bounded accepted scope"
+        elif status in ("ready", "todo") and eligible and selected.get("action"):
+            action = selected["action"]
             decision.update(workflow_stage="READY", dispatchable=True,
                             worker_executable_now=True, reason="All current action prerequisites are satisfied",
                             owner=t.get("assignee"), next_action=action,
                             current_next_action=action,
                             current_next_action_type=selected.get("type") or "worker_action")
+        elif not remaining and accepted:
+            decision.update(
+                workflow_stage="DONE", dispatchable=False,
+                reason="All required actions have accepted evidence and no action remains",
+                owner=None, next_action=None, current_next_action=None,
+                current_next_action_type=None,
+            )
+        elif status in ("ready", "todo") and eligible:
+            decision.update(
+                workflow_stage="PREPARE",
+                reason="No explicit next action is selected; dispatch would manufacture work",
+                owner="control plane",
+                next_action="Select one unsatisfied worker-executable requirement",
+                current_next_action_type="deterministic_preparation",
+                worker_executable_now=False,
+            )
         elif status == "triage":
             children = conn.execute("SELECT 1 FROM task_links WHERE parent_id=? LIMIT 1", (task_id,)).fetchone()
             unknown = not selected.get("action")
+            requirement = remaining[0] if remaining else None
+            requirement_data = requirement if isinstance(requirement, dict) else {}
+            requirement_identity = requirement_data.get("evidence_identity") or requirement_data.get("requirement_id")
+            evidence_already_accepts = bool(
+                requirement_identity and any(
+                    item.get("identity") == requirement_identity for item in evidence_identities
+                )
+            )
+            safely_decomposable = bool(
+                requirement_data.get("worker_executable") is True
+                or requirement_data.get("decomposable") is True
+            )
             decision.update(workflow_stage="TRIAGE", reason="The next required action is unknown",
                             owner=t.get("assignee") or "triage controller",
                             next_action="Derive one bounded unsatisfied requirement")
-            decision["auto_decompose_allowed"] = bool(unknown and remaining and not children)
+            decision["auto_decompose_allowed"] = bool(
+                unknown and safely_decomposable and not evidence_already_accepts
+                and not requirement_data.get("owner_task_id") and not children
+            )
         else:
             decision.update(workflow_stage="HELD",
                             reason="No authorised worker-executable action is currently enabled",
                             owner="operator", next_action="Inspect the explicit eligibility hold",
                             resume_condition="the hold is explicitly released")
 
-    if decision["workflow_stage"] == "READY" and not decision["worker_executable_now"]:
+    if decision["workflow_stage"] == "READY" and not decision["current_next_action"]:
         decision["invariant_violations"].append("READY && no worker action")
         decision["dispatchable"] = False
     if decision["workflow_stage"] in {"WAITING", "OPERATOR", "HELD", "DONE", "SUPERSEDED"}:

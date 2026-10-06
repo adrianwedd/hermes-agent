@@ -63,6 +63,11 @@ def ensure_scope_contract(conn, task_id, *, authority='control_plane'):
         'materialized_by': authority,
         'qualified_for_dispatch': True,
         'legacy_completion_repair': not bool(body),
+        'remaining_required_actions': [scope],
+        'selected_next_action': {
+            'phase': 'READY', 'type': 'worker_action', 'action': scope,
+            'required_authority': None,
+        },
     }
     kb._append_event(conn, task_id, 'completion_requirements', contract)
     new_cid = int(conn.execute('SELECT last_insert_rowid()').fetchone()[0])

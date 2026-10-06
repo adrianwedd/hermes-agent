@@ -2206,8 +2206,14 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
-    """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
-    returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
+    """Recompute every inactive open card through the canonical decision.
+
+    The historical name is retained for callers, but this is no longer a
+    parent-terminal promotion helper. A dependency/evidence/environment change
+    may yield any semantic stage; the native row is aligned where an existing
+    status can represent it, and accepted no-work cards close mechanically.
+    Returns the number of rows whose native lifecycle changed. Opens its own
+    IMMEDIATE txn — call OUTSIDE any write txn.
 
     ``blocked`` is skipped when sticky (explicit ``kanban_block``) or when
     ``consecutive_failures`` reached the limit (else the breaker could never
@@ -2219,11 +2225,12 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
-    promoted = 0
+    changed = 0
     with write_txn(conn):
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
-            "FROM tasks WHERE status IN ('todo', 'blocked')"
+            "FROM tasks WHERE status NOT IN ('done','archived','running') "
+            "AND current_run_id IS NULL AND worker_pid IS NULL AND claim_lock IS NULL"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
@@ -2236,16 +2243,40 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
-            resume_status = _resume_status_from_events(conn, task_id)
             from hermes_cli.kanban_decision import decide
             task = get_task(conn, task_id)
-            decision = decide(conn, task, status_override=resume_status) if task else None
-            if not decision or decision["workflow_stage"] not in {"READY", "REVIEW"}:
+            override = _resume_status_from_events(conn, task_id) if cur_status in {"todo", "blocked"} else None
+            decision = decide(conn, task, status_override=override) if task else None
+            if not decision:
                 continue
-            target = "review" if decision["workflow_stage"] == "REVIEW" else "ready"
-            if not decision["dispatchable"]:
+            stage = decision["workflow_stage"]
+            if stage == "DONE":
+                now = int(time.time())
+                result = task.result or "Accepted bounded contract satisfied"
+                cur = conn.execute(
+                    "UPDATE tasks SET status='done',result=?,completed_at=?,dispatch_eligible=0,"
+                    "block_kind=NULL,block_recurrences=0 WHERE id=? AND status=? "
+                    "AND current_run_id IS NULL AND worker_pid IS NULL AND claim_lock IS NULL",
+                    (result, now, task_id, cur_status),
+                )
+                if cur.rowcount:
+                    _append_event(conn, task_id, "mechanically_completed", {
+                        "decision_fingerprint": decision["decision_fingerprint"],
+                        "accepted_completed_actions": decision["accepted_completed_actions"],
+                        "remaining_required_actions": [],
+                    })
+                    changed += 1
                 continue
-            if cur_status == "blocked":
+            targets = {
+                "TRIAGE": "triage", "PREPARE": "todo", "READY": "ready",
+                "REVIEW": "review", "WAITING": "todo", "BLOCKED": "blocked",
+            }
+            target = targets.get(stage)
+            if target is None or target == cur_status:
+                continue
+            if stage in {"READY", "REVIEW"} and not decision["dispatchable"]:
+                continue
+            if cur_status == "blocked" and stage in {"READY", "REVIEW"}:
                 # At the breaker limit, no auto-recovery (else block ->
                 # recover -> respawn -> exhaust -> block forever). The
                 # counter is preserved so it accumulates across cycles.
@@ -2255,17 +2286,20 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                 if failures >= effective_limit:
                     continue
             cur = conn.execute(
-                "UPDATE tasks SET status=? WHERE id=? AND status=?", (target, task_id, cur_status),
+                "UPDATE tasks SET status=?,dispatch_eligible=? WHERE id=? AND status=?",
+                (target, int(decision["dispatchable"]), task_id, cur_status),
             )
             if cur.rowcount != 1:
                 continue
-            _append_event(conn, task_id, "promoted", {
+            _append_event(conn, task_id, "decision_reconciled", {
+                "previous_status": cur_status,
                 "status": target,
+                "workflow_stage": stage,
                 "decision_fingerprint": decision["decision_fingerprint"],
                 "next_action": decision["next_action"],
             })
-            promoted += 1
-    return promoted
+            changed += 1
+    return changed
 
 
 # --- Claim / complete / block ---

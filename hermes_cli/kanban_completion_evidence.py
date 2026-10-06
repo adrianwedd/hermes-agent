@@ -507,6 +507,20 @@ def prepare_gate(
             "kind": contract["kind"], "artifact_hashes": [], "remote": {},
             "criteria": contract["criteria"],
         }
+    if snapshot[0] == "review":
+        # Entering REVIEW already bound the implementation handoff and its
+        # retained evidence. Completing from REVIEW is the independent
+        # accept/reject decision itself; requiring a second manifest that
+        # merely attests the verdict is receipt ceremony, not acceptance.
+        children_missing = _children_missing(conn, task_id, contract)
+        if children_missing:
+            _refuse(conn, task_id, children_missing, expected_snapshot=snapshot)
+        return {
+            "snapshot": snapshot, "contract_event_id": cid,
+            "kind": contract["kind"], "artifact_hashes": [],
+            "remote": {"basis": "native independent review approval"},
+            "criteria": contract["criteria"],
+        }
     evidence, artifacts, missing = _durable_evidence(
         conn, task_id, cid, contract, metadata
     )

@@ -308,6 +308,7 @@ export const COLUMN_META: Record<string, { codicon: string; tone: string }> = {
   scheduled: { codicon: 'watch', tone: '#a78bfa' },
   ready: { codicon: 'play-circle', tone: '#60a5fa' },
   running: { codicon: 'sync', tone: '#34d399' },
+  execution: { codicon: 'tools', tone: '#fb923c' },
   blocked: { codicon: 'error', tone: '#f87171' },
   review: { codicon: 'eye', tone: '#fbbf24' },
   done: { codicon: 'pass', tone: 'var(--ui-text-tertiary)' },

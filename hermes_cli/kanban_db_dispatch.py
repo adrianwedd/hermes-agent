@@ -1036,6 +1036,8 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
+    infrastructure: bool = False
+    """The process failed before task execution because the shared runtime was unavailable."""
 
     @property
     def run_outcome(self) -> str:
@@ -1059,6 +1061,11 @@ def _classify_dead_worker(
         if worker_output:
             dead.error_text += f" Worker's last output: {worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
+        from hermes_cli.kanban_decision import environment_fingerprint, infrastructure_error
+        if infrastructure_error(dead.error_text):
+            dead.infrastructure = True
+            dead.event_payload["infrastructure"] = True
+            dead.event_payload["environment_fingerprint"] = environment_fingerprint().get("identity")
     return dead
 
 
@@ -1195,7 +1202,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation:
+            if dead.rate_limited or dead.protocol_violation or dead.infrastructure:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
@@ -1272,6 +1279,19 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer, "terminal_provider": True},
+            )
+        elif dead.infrastructure:
+            tripped = _record_task_failure(
+                conn, tid,
+                error=error_text,
+                outcome="crashed",
+                release_claim=False,
+                end_run=False,
+                infrastructure=True,
+                event_payload_extra={
+                    "pid": pid, "claimer": claimer, "infrastructure": True,
+                    "environment_fingerprint": dead.event_payload.get("environment_fingerprint"),
+                },
             )
         else:
             is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
@@ -1564,7 +1584,7 @@ def check_respawn_guard(
         "ORDER BY ended_at DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    if latest_run is not None and latest_run["outcome"] == "spawn_failed":
+    if latest_run is not None and latest_run["outcome"] in {"spawn_failed", "crashed"}:
         if rl_cooldown > 0 and _kb._json_dict(latest_run["metadata"]).get("infrastructure"):
             ended_at = latest_run["ended_at"]
             if ended_at is not None and (now - int(ended_at)) < rl_cooldown:
@@ -1763,17 +1783,23 @@ def dispatch_profile_allowlist_summary() -> str:
 
 def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
     rows = conn.execute(
-        "SELECT DISTINCT assignee FROM tasks "
+        "SELECT id,assignee FROM tasks "
         "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
         (status,),
     ).fetchall()
     if not rows:
         return False
     profile_exists = _profile_exists_fn()
-    if profile_exists is None:
-        # Can't introspect — assume spawnable, preserve legacy behavior.
-        return True
-    return any(profile_exists(row["assignee"]) for row in rows)
+    from hermes_cli.kanban_decision import claim_allowed
+
+    lane = "review" if status == "review" else "ready"
+    for row in rows:
+        task = _kb.get_task(conn, row["id"])
+        if task is None or not claim_allowed(conn, task, lane)[0]:
+            continue
+        if profile_exists is None or profile_exists(row["assignee"]):
+            return True
+    return False
 
 
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
@@ -1973,6 +1999,14 @@ def dispatch_once(
     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
     resolved DB path so unrelated boards tick in parallel.
     """
+    if not dry_run:
+        # Deterministic allow-listed external probes run before the dispatcher
+        # lock; their CAS transition takes its own short write transaction.
+        # This is how a satisfied auth/time/environment condition becomes
+        # dispatchable without a model being sent to rediscover it.
+        from hermes_cli.kanban_resume import observe_resume_conditions
+        observe_resume_conditions(conn, board=board)
+
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
             conn,
@@ -2279,12 +2313,20 @@ def _tick_spawn_budget(
 
 
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
-    """Unclaimed rows of one lane in dispatch order."""
-    return conn.execute(
+    """Canonical-claimable rows of one lane in dispatch order."""
+    rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+    from hermes_cli.kanban_decision import claim_allowed
+
+    lane = "review" if status == "review" else "ready"
+    return [
+        row for row in rows
+        if (task := _kb.get_task(conn, row["id"])) is not None
+        and claim_allowed(conn, task, lane)[0]
+    ]
 
 
 def _any_spawnable_review(

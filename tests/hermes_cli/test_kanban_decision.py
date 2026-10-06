@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -78,6 +79,12 @@ def test_t_e5d24de5_review_flag_and_claim_guard_cannot_disagree(board):
 
 
 def test_t_ebcf430c_infrastructure_fault_does_not_change_review_semantics(board):
+    import hermes_cli.kanban_decision as decision_module
+
+    original = decision_module.environment_fingerprint
+    decision_module.environment_fingerprint = lambda: {
+        "identity": "broken-env", "healthy": False,
+    }
     tid = _task(board, "independent MoA review", status="review")
     _contract(board, tid, kind="review", require_review=False, require_commands=False)
     now = int(time.time())
@@ -87,18 +94,45 @@ def test_t_ebcf430c_infrastructure_fault_does_not_change_review_semantics(board)
         (tid, "reviewer", now - 2, now - 1,
          "no dependency environment is committed for this install"),
     )
-    decision = decide(board, kb.get_task(board, tid))
+    try:
+        decision = decide(board, kb.get_task(board, tid))
+    finally:
+        decision_module.environment_fingerprint = original
     assert decision["workflow_stage"] == "REVIEW"
     assert decision["execution_health"]["state"] == "INFRASTRUCTURE_FAULT"
     assert decision["dispatchable"] is False
     assert decision["resume_condition"] == "execution environment fingerprint changes"
 
 
-def test_specific_dependency_evidence_releases_child_while_parent_remains_open(board):
+def test_t_ebcf430c_environment_repair_releases_same_review(board, monkeypatch):
+    import hermes_cli.kanban_decision as decision_module
+
+    tid = _task(board, "independent MoA review after repair", status="review")
+    _contract(board, tid, kind="review", require_review=False, require_commands=False)
+    now = int(time.time())
+    board.execute(
+        "INSERT INTO task_runs(task_id,profile,status,started_at,ended_at,outcome,error,metadata) "
+        "VALUES(?,?,'crashed',?,?, 'crashed',?,?)",
+        (tid, "reviewer", now - 2, now - 1,
+         "no dependency environment is committed for this install",
+         json.dumps({"infrastructure": True, "environment_fingerprint": "old"})),
+    )
+    monkeypatch.setattr(decision_module, "environment_fingerprint", lambda: {
+        "identity": "repaired", "healthy": True,
+    })
+    decision = decide(board, kb.get_task(board, tid))
+    assert decision["workflow_stage"] == "REVIEW"
+    assert decision["execution_health"]["state"] == "HEALTHY"
+    assert decision["dispatchable"] is True
+
+
+def test_t_8ff8ec92_specific_policy_output_releases_experiment_without_parent_done(board):
     parent = _task(board, "produce shared policy", status="ready")
     child = _task(board, "run experiment", status="todo")
     _contract(board, parent)
-    _contract(board, child)
+    _contract(board, child, selected_next_action={
+        "action": "run the experiment", "type": "worker_action",
+    })
     kb.link_tasks(board, parent, child)
     kb._append_event(board, child, "dependency_requirement", {
         "parent_id": parent, "requirement_id": "policy-v1",
@@ -113,6 +147,120 @@ def test_specific_dependency_evidence_releases_child_while_parent_remains_open(b
     assert released["workflow_stage"] == "READY"
     assert released["dispatchable"] is True
     assert kb.get_task(board, parent).status == "ready"
+
+
+def test_t_e07ae2d6_review_approval_closes_mechanically_without_receipt_ceremony(board):
+    tid = _task(board, "MoA route status implementation", status="review")
+    _contract(board, tid, kind="review", require_review=False, require_commands=False)
+    assert kb.complete_task(board, tid, result="APPROVED", force=True) is True
+    task = kb.get_task(board, tid)
+    assert task.status == "done"
+    assert decide(board, task)["workflow_stage"] == "DONE"
+
+
+def test_t_1d2e2334_upstream_completion_recomputes_each_dependant(board):
+    parent = _task(board, "package provisioning", status="ready")
+    ready_child = _task(board, "consumer with action", status="todo")
+    waiting_child = _task(board, "consumer waiting on window", status="todo")
+    _contract(
+        board, parent, kind="research", require_review=False, require_commands=False,
+        accepted_completed_actions=["existing environments falsify missing-package premise"],
+        remaining_required_actions=[],
+    )
+    _contract(board, ready_child, selected_next_action={"action": "use packages", "type": "worker_action"})
+    _contract(
+        board, waiting_child,
+        selected_next_action={"action": "run live experiment", "type": "worker_action"},
+        external_conditions=[{
+            "condition_id": "window", "requirement": "exclusive window granted",
+            "resolver": "operator", "resume_condition": "window grant is recorded",
+            "satisfied": False,
+        }],
+    )
+    kb.link_tasks(board, parent, ready_child)
+    kb.link_tasks(board, parent, waiting_child)
+    assert kb.recompute_ready(board) >= 1
+    assert kb.get_task(board, parent).status == "done"
+    assert kb.get_task(board, ready_child).status == "ready"
+    assert kb.get_task(board, waiting_child).status == "todo"
+    assert decide(board, kb.get_task(board, waiting_child))["workflow_stage"] == "WAITING"
+
+
+def test_t_29ca9c21_authorised_missing_checkout_is_provisioned_directly(tmp_path):
+    from hermes_cli.kanban_preparation import provision_authorised_workspace
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q", str(origin)], check=True)
+    subprocess.run(["git", "-C", str(origin), "config", "user.email", "fixture@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(origin), "config", "user.name", "Fixture"], check=True)
+    (origin / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(origin), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(origin), "commit", "-qm", "fixture"], check=True)
+    revision = subprocess.check_output(
+        ["git", "-C", str(origin), "rev-parse", "HEAD"], text=True,
+    ).strip()
+    destination = tmp_path / "qualified-checkout"
+    ok, reason = provision_authorised_workspace({
+        "provision_missing_workspace": True,
+        "isolated_workspace": True,
+        "canonical_remote": str(origin),
+        "source_revision": revision,
+        "workspace_path": str(destination),
+    })
+    assert (ok, reason) == (True, "")
+    assert subprocess.check_output(
+        ["git", "-C", str(destination), "rev-parse", "HEAD"], text=True,
+    ).strip() == revision
+
+
+def test_revised_dependency_invalidates_stale_satisfaction(board):
+    parent = _task(board, "artifact producer", status="ready")
+    child = _task(board, "artifact consumer", status="todo")
+    _contract(board, parent)
+    _contract(board, child, selected_next_action={"action": "consume artifact", "type": "worker_action"})
+    kb.link_tasks(board, parent, child)
+    kb._append_event(board, child, "dependency_requirement", {
+        "parent_id": parent, "requirement_id": "artifact", "evidence_identity": "sha256:v1",
+    })
+    kb._append_event(board, child, "dependency_requirement_satisfied", {
+        "requirement_id": "artifact", "evidence_identity": "sha256:v1",
+    })
+    assert decide(board, kb.get_task(board, child), status_override="ready")["dispatchable"] is True
+    kb._append_event(board, child, "dependency_requirement", {
+        "parent_id": parent, "requirement_id": "artifact", "evidence_identity": "sha256:v2",
+    })
+    revised = decide(board, kb.get_task(board, child), status_override="ready")
+    assert revised["workflow_stage"] == "WAITING"
+    assert revised["dispatchable"] is False
+
+
+def test_unsatisfied_external_condition_gates_selected_worker_action(board):
+    tid = _task(board, "NotebookLM retrieval", status="ready")
+    _contract(
+        board, tid,
+        selected_next_action={"action": "retrieve NotebookLM sources", "type": "worker_action"},
+        external_conditions=[{
+            "condition_id": "google-auth", "type": "external_authentication",
+            "requirement": "Google authentication is valid", "resolver": "Adrian",
+            "resume_condition": "nlm login --check succeeds", "satisfied": False,
+        }],
+    )
+    decision = decide(board, kb.get_task(board, tid))
+    assert decision["workflow_stage"] == "WAITING"
+    assert decision["dispatchable"] is False
+
+
+def test_completed_scope_without_selected_action_never_manufactures_work(board):
+    tid = _task(board, "accepted bounded work", status="ready")
+    _contract(
+        board, tid, accepted_completed_actions=["bounded scope accepted"],
+        remaining_required_actions=[],
+    )
+    decision = decide(board, kb.get_task(board, tid))
+    assert decision["workflow_stage"] == "DONE"
+    assert decision["dispatchable"] is False
+    assert decision["next_action"] is None
 
 
 def test_unchanged_no_work_assessment_is_idempotent(board):
@@ -153,6 +301,7 @@ def test_waiting_resume_condition_satisfaction_atomically_enables_existing_actio
                   "phase": "WAITING_FOR_AUTHORITY", "type": "external_authentication",
                   "action": "Authenticate Google profile default", "resolver": "Adrian",
                   "resume_condition": "nlm login --check succeeds",
+                  "condition_id": "google-auth",
               })
     before = decide(board, kb.get_task(board, tid))
     assert before["workflow_stage"] == "WAITING"
@@ -162,12 +311,34 @@ def test_waiting_resume_condition_satisfaction_atomically_enables_existing_actio
         evidence={"exit_code": 0, "profile": "default", "notebooks_visible": 479},
         next_action="retrieve/export supplied NotebookLM sources",
         expected_status="blocked", expected_decision_fingerprint=before["decision_fingerprint"],
+        condition_id="google-auth",
     )
     task = kb.get_task(board, tid)
     assert (task.status, task.dispatch_eligible, task.block_kind) == ("ready", True, None)
     assert after["workflow_stage"] == "READY"
     assert after["dispatchable"] is True
     assert after["next_action"] == "retrieve/export supplied NotebookLM sources"
+
+
+def test_dispatch_observer_notices_notebooklm_login_without_model_turn(board):
+    from hermes_cli.kanban_resume import observe_resume_conditions
+
+    tid = _task(board, "retrieve NotebookLM sources", status="blocked", eligible=False)
+    _contract(board, tid, kind="research", require_review=False,
+              selected_next_action={
+                  "phase": "WAITING_FOR_AUTHORITY", "type": "external_authentication",
+                  "action": "Authenticate Google profile default", "resolver": "Adrian",
+                  "resume_condition": "nlm login --check succeeds",
+                  "condition_probe": "notebooklm_auth", "condition_id": "google-auth",
+                  "resume_next_action": "retrieve/export supplied NotebookLM sources",
+              })
+    resumed = observe_resume_conditions(
+        board,
+        probes={"notebooklm_auth": lambda: {"exit_code": 0, "profile": "default"}},
+    )
+    assert resumed == [tid]
+    task = kb.get_task(board, tid)
+    assert (task.status, task.dispatch_eligible) == ("ready", True)
 
 
 def test_resume_rolls_back_if_no_worker_action_can_become_ready(board):

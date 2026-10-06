@@ -87,7 +87,7 @@
   }
 
   // Board column display order; any backend status not listed here renders after these.
-  const COLUMN_ORDER = ["triage", "todo", "ready", "running", "blocked", "review", "done"];
+  const COLUMN_ORDER = ["triage", "todo", "scheduled", "ready", "running", "execution", "blocked", "review", "done"];
   // English fallback dictionaries — used when the i18n catalog is missing
   // a key, and as defaults for the get*() helpers below so callers running
   // outside any React component (where there's no `t`) still get sane text.
@@ -96,6 +96,7 @@
     todo: "Todo",
     ready: "Ready",
     running: "In Progress",
+    execution: "Environment",
     blocked: "Blocked",
     review: "Review",
     done: "Done",
@@ -106,6 +107,7 @@
     todo: "Waiting on dependencies or unassigned",
     ready: "Dependencies satisfied; assign a profile to dispatch",
     running: "Claimed by a worker — in-flight",
+    execution: "The work remains valid, but the shared execution environment must recover",
     blocked: "Worker asked for human input",
     review: "Implementation complete — awaiting review",
     done: "Completed",

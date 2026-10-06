@@ -69,7 +69,7 @@ def test_board_empty(client):
     data = r.json()
     # All canonical columns present (triage + the rest), each empty.
     names = [c["name"] for c in data["columns"]]
-    assert set(names) == kb.VALID_STATUSES - {"archived"}
+    assert set(names) == (kb.VALID_STATUSES - {"archived"}) | {"execution"}
     for expected in ("triage", "todo", "scheduled", "ready", "running", "blocked", "done"):
         assert expected in names, f"missing column {expected}: {names}"
     assert all(len(c["tasks"]) == 0 for c in data["columns"])
@@ -1811,7 +1811,7 @@ def test_dependency_wait_is_waiting_and_not_in_ready(client, kanban_home):
         child = kb.create_task(conn, title="waiting-child", assignee="implementer", parents=[parent])
         conn.commit()
 
-    card = _card(client, "todo", child)
+    card = _card(client, "scheduled", child)
     fact = card["card_facts"]["dispatch"]
 
     assert fact["stage"] == "WAITING"
