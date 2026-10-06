@@ -405,7 +405,14 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
             # lifecycle. New guarded work fails closed and self-prepares.
             contract_valid = not guarded_contract
         prep = preparation_reason(conn, task_id)
-        if explicitly_unqualified:
+        if contract_valid and remaining_declared and not remaining and accepted:
+            decision.update(
+                workflow_stage="DONE", dispatchable=False,
+                reason="All required actions have accepted evidence and no action remains",
+                owner=None, next_action=None, current_next_action=None,
+                current_next_action_type=None,
+            )
+        elif explicitly_unqualified:
             decision.update(workflow_stage="PREPARE",
                             reason="Original scope and acceptance await qualification",
                             owner=t.get("assignee") or "preparation controller",
@@ -478,13 +485,6 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
                                 resume_condition="dispatch eligibility changes")
                 decision["invariant_violations"].append(
                     "REVIEW advertised runnable but claim rejects")
-        elif remaining_declared and not remaining and accepted:
-            decision.update(
-                workflow_stage="DONE", dispatchable=False,
-                reason="All required actions have accepted evidence and no action remains",
-                owner=None, next_action=None, current_next_action=None,
-                current_next_action_type=None,
-            )
         elif status in ("ready", "todo") and eligible and selected.get("action"):
             action = selected["action"]
             decision.update(workflow_stage="READY", dispatchable=True,

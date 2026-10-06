@@ -396,6 +396,21 @@ def test_completed_scope_ignores_stale_selected_action(board):
     assert decision["next_action"] is None
 
 
+def test_completed_truth_closes_stale_blocked_state(board):
+    tid = _task(board, "accepted work left blocked", status="blocked", eligible=False)
+    _contract(
+        board, tid,
+        accepted_completed_actions=["bounded scope accepted"],
+        remaining_required_actions=[],
+        selected_next_action={"action": "obsolete action", "type": "worker_action"},
+    )
+    decision = decide(board, kb.get_task(board, tid))
+    assert decision["workflow_stage"] == "DONE"
+    assert decision["dispatchable"] is False
+    assert kb.recompute_ready(board) == 1
+    assert kb.get_task(board, tid).status == "done"
+
+
 def test_recompute_preserves_native_scheduled_wait(board):
     """A future wake remains Scheduled rather than becoming held Todo."""
     tid = _task(board, "wait for maintenance window", status="scheduled", eligible=True)
