@@ -182,3 +182,22 @@ def test_reviewed_code_operator_approval_still_parks_terminal_attempt(card):
     assert not kb.get_task(conn, tid).dispatch_eligible
     assert kb.claim_review_task(conn, tid) is None
     assert conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='operator_review_handoff'", (tid,)).fetchone()
+
+
+def test_independent_reviewer_self_handoff_cannot_redispatch(card):
+    conn, tid = card
+    assert kb.reassign_task(conn, tid, "reviewer")
+    assert kb.request_review(conn, tid, reviewer="reviewer", summary="Implementation ready")
+    assert kb.get_task(conn, tid).dispatch_eligible
+    claimed = kb.claim_review_task(conn, tid)
+    assert claimed is not None
+    run_id = kb.get_task(conn, tid).current_run_id
+    assert kb.request_review(conn, tid, reviewer="reviewer", expected_run_id=run_id,
+        summary="Independent review complete; operator must decide acceptance")
+    task = kb.get_task(conn, tid)
+    assert task.status == "review"
+    assert not task.dispatch_eligible
+    assert task.current_run_id is None
+    assert kb.claim_review_task(conn, tid) is None
+    assert conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == 2
+    assert conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='operator_review_handoff' AND run_id=?", (tid, run_id)).fetchone()
