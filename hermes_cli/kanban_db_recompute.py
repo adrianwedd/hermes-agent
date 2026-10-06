@@ -58,6 +58,12 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             if target is None:
                 continue
             if target == current:
+                # Same-status eligibility repair is only safe for canonical
+                # WAITING. READY/REVIEW may be temporarily non-dispatchable
+                # because execution health is bad; persisting that overlay as
+                # dispatch_eligible=0 would turn recovery into a stale hold.
+                if stage != "WAITING":
+                    continue
                 if int(task.dispatch_eligible) == desired_eligible:
                     continue
                 updated = conn.execute(

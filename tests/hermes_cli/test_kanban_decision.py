@@ -244,6 +244,40 @@ def test_t_ebcf430c_environment_repair_releases_same_review(board, monkeypatch):
     assert decision["dispatchable"] is True
 
 
+def test_infrastructure_fault_recompute_does_not_self_seal_ready(board, monkeypatch):
+    import hermes_cli.kanban_decision as decision_module
+
+    tid = _task(board, "ready action during infrastructure fault", status="ready")
+    _contract(board, tid, selected_next_action={
+        "phase": "READY", "type": "worker_action", "action": "Run the action",
+    })
+    now = int(time.time())
+    board.execute(
+        "INSERT INTO task_runs(task_id,profile,status,started_at,ended_at,outcome,error,metadata) "
+        "VALUES(?,?,'crashed',?,?, 'crashed',?,?)",
+        (tid, "worker", now - 2, now - 1,
+         "no dependency environment is committed for this install",
+         json.dumps({"infrastructure": True, "environment_fingerprint": "broken"})),
+    )
+    monkeypatch.setattr(decision_module, "environment_fingerprint", lambda: {
+        "identity": "broken", "healthy": False,
+    })
+    fault = decide(board, kb.get_task(board, tid))
+    assert fault["workflow_stage"] == "READY"
+    assert fault["dispatchable"] is False
+    assert kb.recompute_ready(board) == 0
+    assert kb.get_task(board, tid).dispatch_eligible is True
+
+    monkeypatch.setattr(decision_module, "environment_fingerprint", lambda: {
+        "identity": "repaired", "healthy": True,
+    })
+    recovered = decide(board, kb.get_task(board, tid))
+    assert recovered["workflow_stage"] == "READY"
+    assert recovered["dispatchable"] is True
+    assert kb.recompute_ready(board) == 0
+    assert kb.get_task(board, tid).dispatch_eligible is True
+
+
 def test_t_8ff8ec92_specific_policy_output_releases_experiment_without_parent_done(board):
     parent = _task(board, "produce shared policy", status="ready")
     child = _task(board, "run experiment", status="todo")
