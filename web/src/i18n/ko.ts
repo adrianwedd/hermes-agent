@@ -737,6 +737,9 @@ export const ko: Translations = {
     selectForBulk: "일괄 작업을 위해 선택",
     clickToEdit: "클릭하여 편집",
     clickToEditAssignee: "클릭하여 담당자 편집",
+    editPriority: "우선순위 변경",
+    editPriorityHint: "우선순위를 변경합니다. 숫자가 클수록 디스패처가 먼저 가져갑니다.",
+    priorityInvalid: "정수를 입력하세요(0 이 기본값이며, 클수록 먼저 가져갑니다).",
     emptyAssignee: "(비우면 = 지정 해제)",
     columnLabels: {
       triage: "분류",

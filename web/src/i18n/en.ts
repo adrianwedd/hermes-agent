@@ -851,6 +851,11 @@ export const en: Translations = {
     selectForBulk: "Select for bulk actions",
     clickToEdit: "Click to edit",
     clickToEditAssignee: "Click to edit assignee",
+    editPriority: "Change priority",
+    editPriorityHint:
+      "Change priority. Higher numbers are claimed first by the dispatcher.",
+    priorityInvalid:
+      "Enter a whole number. 0 is the default; higher is claimed first.",
     emptyAssignee: "(empty = unassign)",
     columnLabels: {
       triage: "Triage",

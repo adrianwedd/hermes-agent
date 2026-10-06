@@ -193,18 +193,20 @@ def _refuse(conn, task_id, missing, *, expected_snapshot=None):
                 for reason in missing
             )
         if operator_declaration_pending:
-            conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=?", (task_id,))
+            # Missing closure metadata is not a dispatch hold. Preserve the
+            # handoff and let Review resolve it without manufacturing Blocked.
+            conn.execute("UPDATE tasks SET dispatch_eligible=1 WHERE id=?", (task_id,))
             kb._append_event(conn, task_id, "operator_contract_handoff", {
-                "automatic_retry": False, "dispatch_eligible": False,
+                "automatic_retry": False, "dispatch_eligible": True,
                 "operator_action_required": True,
             })
         if operator_review_pending:
             # A worker requesting independent review must remain eligible for
             # that lane. Only a completed review awaiting operator approval is
-            # parked; existing manual/admin eligibility holds are never lifted.
+            # retained in Review; it is never converted into a generic hold.
             if expected_snapshot[0] == 'review':
-                conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=?", (task_id,))
-                kb._append_event(conn, task_id, 'operator_review_handoff', {'automatic_retry': False, 'dispatch_eligible': False})
+                conn.execute("UPDATE tasks SET dispatch_eligible=1 WHERE id=?", (task_id,))
+                kb._append_event(conn, task_id, 'operator_review_handoff', {'automatic_retry': False, 'dispatch_eligible': True})
             else:
                 kb._append_event(conn, task_id, 'independent_review_required', {'automatic_implementation_retry': False, 'review_dispatch_allowed_if_eligible': True})
         kb._append_event(
@@ -474,6 +476,8 @@ def _local_coding_missing(contract, status, force):
 def prepare_gate(
     conn, task_id, metadata, *, expected_run_id=None, force=False, api=None
 ):
+    from hermes_cli.kanban_completion_workflow import ensure_scope_contract
+    ensure_scope_contract(conn, task_id, authority="control_plane_completion_repair")
     snapshot = _snapshot(conn, task_id)
     if snapshot is None:
         return False
@@ -494,6 +498,15 @@ def prepare_gate(
             ],
             expected_snapshot=snapshot,
         )
+    if contract.get("legacy_completion_repair") is True:
+        # Title-only legacy cards predate native evidence manifests. The
+        # explicit completion result is their bounded acceptance record; do not
+        # manufacture a receipt ceremony after the work is already complete.
+        return {
+            "snapshot": snapshot, "contract_event_id": cid,
+            "kind": contract["kind"], "artifact_hashes": [], "remote": {},
+            "criteria": contract["criteria"],
+        }
     evidence, artifacts, missing = _durable_evidence(
         conn, task_id, cid, contract, metadata
     )

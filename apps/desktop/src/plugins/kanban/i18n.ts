@@ -124,6 +124,10 @@ type KanbanMessages = {
   metaCreatedBy: string
   metaCreated: string
   metaWorkerPid: string
+  /** After-creation priority editing — native queue order, not decoration. */
+  priorityEdit: string
+  priorityHint: string
+  priorityInvalid: string
   /** #124391 — blocked-card detail: why it blocked and what it cost. */
   blockKindTip: (kind: string) => string
   blockReason: string
@@ -351,6 +355,9 @@ export const en: KanbanMessages = {
   metaCreatedBy: 'Created by',
   metaCreated: 'Created',
   metaWorkerPid: 'Worker pid',
+  priorityEdit: 'Change priority',
+  priorityHint: 'Change priority. Higher numbers are claimed first by the dispatcher.',
+  priorityInvalid: 'Enter a whole number (0 is the default; higher is claimed first).',
   blockKindTip: kind =>
     kind === 'needs_input'
       ? 'The worker asked for human input.'
@@ -579,6 +586,9 @@ const ja: KanbanMessages = {
   metaCreatedBy: '作成者',
   metaCreated: '作成',
   metaWorkerPid: 'ワーカー PID',
+  priorityEdit: '優先度を変更',
+  priorityHint: '優先度を変更。数値が大きいほどディスパッチャに先に取得されます。',
+  priorityInvalid: '整数を入力してください（0 が既定、大きいほど先に取得されます）。',
   blockKindTip: kind =>
     kind === 'needs_input'
       ? 'ワーカーが人間の入力を求めています。'
@@ -806,6 +816,9 @@ const zh: KanbanMessages = {
   metaCreatedBy: '创建者',
   metaCreated: '创建于',
   metaWorkerPid: '工作单元 PID',
+  priorityEdit: '修改优先级',
+  priorityHint: '修改优先级。数值越大越先被调度器领取。',
+  priorityInvalid: '请输入整数（0 为默认，数值越大越先领取）。',
   blockKindTip: kind =>
     kind === 'needs_input'
       ? '工作单元正在等待人工输入。'
@@ -1031,6 +1044,9 @@ const zhHant: KanbanMessages = {
   metaCreatedBy: '建立者',
   metaCreated: '建立於',
   metaWorkerPid: '工作單元 PID',
+  priorityEdit: '修改優先順序',
+  priorityHint: '修改優先順序。數值越大越先被調度器領取。',
+  priorityInvalid: '請輸入整數（0 為預設，數值越大越先領取）。',
   blockKindTip: kind =>
     kind === 'needs_input'
       ? '工作單元正在等待人工輸入。'

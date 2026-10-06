@@ -114,6 +114,9 @@ def decompose_triage_task(
     # (create_task, link_tasks, add_comment) must not be called in here.
     now = int(time.time())
     with write_txn(conn):
+        from hermes_cli.kanban_completion_workflow import operator_contract_pending
+        if operator_contract_pending(conn, task_id):
+            return None
         root_row = conn.execute(
             "SELECT id, status, tenant, workspace_kind, workspace_path "
             "FROM tasks WHERE id = ?", (task_id,),

@@ -738,6 +738,9 @@ export const af: Translations = {
     selectForBulk: "Kies vir grootmaataksies",
     clickToEdit: "Klik om te redigeer",
     clickToEditAssignee: "Klik om toegewysde te redigeer",
+    editPriority: "Verander prioriteit",
+    editPriorityHint: "Verander prioriteit. Hoër nommers word eerste deur die versender geëis.",
+    priorityInvalid: "Voer 'n heelgetal in (0 is die verstek; hoër word eerste geëis).",
     emptyAssignee: "(leeg = ontbind toekenning)",
     columnLabels: {
       triage: "Triage",

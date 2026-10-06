@@ -738,6 +738,9 @@ export const es: Translations = {
     selectForBulk: "Seleccionar para acciones por lotes",
     clickToEdit: "Haz clic para editar",
     clickToEditAssignee: "Haz clic para editar el asignado",
+    editPriority: "Cambiar prioridad",
+    editPriorityHint: "Cambiar prioridad. El dispatcher reclama primero los números más altos.",
+    priorityInvalid: "Introduce un número entero (0 es el valor predeterminado; los más altos se reclaman primero).",
     emptyAssignee: "(vacío = sin asignar)",
     columnLabels: {
       triage: "Clasificación",

@@ -738,6 +738,9 @@ export const tr: Translations = {
     selectForBulk: "Toplu işlemler için seç",
     clickToEdit: "Düzenlemek için tıklayın",
     clickToEditAssignee: "Atanan kişiyi düzenlemek için tıklayın",
+    editPriority: "Önceliği değiştir",
+    editPriorityHint: "Önceliği değiştir. Yüksek sayılar dispatcher tarafından önce alınır.",
+    priorityInvalid: "Bir tam sayı girin (0 varsayılandır; yüksek olan önce alınır).",
     emptyAssignee: "(boş = atamayı kaldır)",
     columnLabels: {
       triage: "Triyaj",

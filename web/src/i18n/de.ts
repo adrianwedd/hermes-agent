@@ -737,6 +737,9 @@ export const de: Translations = {
     selectForBulk: "Für Bulk-Aktionen auswählen",
     clickToEdit: "Zum Bearbeiten klicken",
     clickToEditAssignee: "Klicken, um zuständige Person zu bearbeiten",
+    editPriority: "Priorität ändern",
+    editPriorityHint: "Priorität ändern. Höhere Zahlen werden vom Dispatcher zuerst beansprucht.",
+    priorityInvalid: "Geben Sie eine ganze Zahl ein (0 ist die Voreinstellung; höhere werden zuerst beansprucht).",
     emptyAssignee: "(leer = Zuweisung aufheben)",
     columnLabels: {
       triage: "Triage",

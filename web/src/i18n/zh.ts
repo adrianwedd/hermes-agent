@@ -733,6 +733,9 @@ export const zh: Translations = {
     selectForBulk: "选择以进行批量操作",
     clickToEdit: "点击编辑",
     clickToEditAssignee: "点击编辑负责人",
+    editPriority: "修改优先级",
+    editPriorityHint: "修改优先级。数值越大，调度器越先领取。",
+    priorityInvalid: "请输入整数（0 为默认值，数值越大越先领取）。",
     emptyAssignee: "（留空 = 取消分配）",
     columnLabels: {
       triage: "待分类",

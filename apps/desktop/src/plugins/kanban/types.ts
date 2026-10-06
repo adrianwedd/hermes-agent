@@ -32,7 +32,20 @@ export interface DeliveryReceipt {
   source: { attachment_id: number; filename: string; sha256: string; basis: string }
 }
 export interface KanbanCardFacts {
-  dispatch?: { eligible?: boolean; label: string; reason: string; owner?: string | null; next_action?: string | null; basis: string }
+  dispatch?: {
+    eligible?: boolean
+    terminal?: boolean
+    /** Canonical derived state: TRIAGE/PREPARE/READY/RUNNING/REVIEW/OPERATOR/WAITING/
+     *  BLOCKED/HELD/DONE/SUPERSEDED. The board files the card by `column`. */
+    stage?: string
+    dispatchable?: boolean
+    column?: string
+    label: string
+    reason: string
+    owner?: string | null
+    next_action?: string | null
+    basis: string
+  }
   delivery?: DeliveryReceipt | null
   run_routes?: { selected: RunRouteReceipt | null; history: RunRouteReceipt[]; planned_agent: string; historical_inference: false }
   tokens?: { current: null | RecordedTokenUsage; cumulative: null | RecordedTokenUsage; coverage: string }

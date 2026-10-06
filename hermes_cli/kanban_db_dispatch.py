@@ -2043,10 +2043,16 @@ def _dispatch_lane_task(
     """
     task_id = row["id"]
     task = _kb.get_task(conn, task_id)
-    from hermes_cli.kanban_administrative_hold import administrative_pending
-    from hermes_cli.kanban_completion_workflow import operator_contract_pending
-    if task is None or not task.dispatch_eligible or administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
-        result.respawn_guarded.append((task_id, "dispatch_eligible=false or administrative_pending"))
+    from hermes_cli.kanban_completion_workflow import ensure_scope_contract
+    if task is not None and not dry_run:
+        ensure_scope_contract(conn, task_id, authority='control_plane_pre_dispatch')
+    # The dashboard, queue scan and final claim all consume this exact decision.
+    # Capacity/admission is evaluated later and never rewrites semantic stage.
+    from hermes_cli.kanban_decision import claim_allowed
+    allowed, decision = claim_allowed(conn, task, lane) if task is not None else (False, None)
+    if not allowed:
+        reason = decision["reason"] if decision else "task disappeared"
+        result.respawn_guarded.append((task_id, reason))
         return False
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
     # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready

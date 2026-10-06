@@ -179,6 +179,27 @@
 .hermes-kanban-dot-done     { background: #4a8cd1; }  /* blue */
 .hermes-kanban-dot-archived { background: var(--color-border); }
 
+/* ---- Effective admission chip (stage + concrete next action) ------- */
+/* The primary state the operator reads on a card. A lane header alone is ambiguous
+   (Ready is a queue, but only for a card the dispatcher will actually claim), so the
+   card carries its own derived stage: OPERATOR/HELD are attention and fault colours,
+   BLOCKED is the destructive fault colour, and a finished card is neutral history. */
+
+.hermes-kanban-admission {
+  font-size: 0.625rem;
+  line-height: 1.2;
+  white-space: normal;
+  text-align: left;
+}
+.hermes-kanban-admission--operator {
+  border-color: #d4a24a;
+  color: #d4a24a;
+}
+.hermes-kanban-admission--held      { border-color: var(--color-destructive, #d14a4a); color: var(--color-destructive, #d14a4a); }
+.hermes-kanban-admission--blocked   { border-color: var(--color-destructive, #d14a4a); color: var(--color-destructive, #d14a4a); }
+.hermes-kanban-admission--waiting   { color: var(--color-muted-foreground); }
+.hermes-kanban-admission--terminal  { color: var(--color-muted-foreground); }
+
 /* ---- Progress pill (N/M child tasks done) --------------------------- */
 
 .hermes-kanban-progress {
@@ -765,6 +786,21 @@
   padding: 0;
 }
 .hermes-kanban-edit-link:hover { color: var(--color-ring); }
+
+/* After-creation priority editing. The edit affordance sits beside the value
+   (it is a real <button>, so it is a tab stop); the refusal copy is styled like
+   the other advisory rows rather than as a field error, since a refused draft
+   writes nothing. */
+.hermes-kanban-priority-edit {
+  margin-left: 0.35rem;
+  letter-spacing: 0.02em;
+}
+.hermes-kanban-priority-invalid {
+  flex-basis: 100%;
+  color: var(--color-destructive, #d14a4a);
+  font-size: 0.65rem;
+  line-height: 1.35;
+}
 
 .hermes-kanban-textarea {
   width: 100%;

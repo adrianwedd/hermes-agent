@@ -2223,67 +2223,57 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     with write_txn(conn):
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
-            "FROM tasks WHERE status IN ('todo', 'blocked') AND dispatch_eligible = 1"
+            "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
-            from hermes_cli.kanban_administrative_hold import administrative_pending
-            from hermes_cli.kanban_completion_workflow import operator_contract_pending
-            if administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
-                continue
-            from hermes_cli.kanban_readiness import preparation_reason
-            if _resume_status_from_events(conn, task_id) != 'review' and preparation_reason(conn, task_id):
-                continue
+            from hermes_cli.kanban_completion_workflow import ensure_scope_contract
+            # Contract bookkeeping belongs to the control plane and must happen
+            # before readiness is evaluated. Deferring it until claim leaves
+            # eligible Todo cards unable to reach the claim boundary at all.
+            ensure_scope_contract(conn, task_id, authority='control_plane_pre_promotion')
             cur_status = row["status"]
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?", (task_id,),
-            ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
-                resume_status = _resume_status_from_events(conn, task_id)
-                if cur_status == "blocked":
-                    # At the breaker limit, no auto-recovery (else block ->
-                    # recover -> respawn -> exhaust -> block forever). The
-                    # counter is preserved so it accumulates across cycles.
-                    failures = int(row["consecutive_failures"] or 0)
-                    task_limit = row["max_retries"]
-                    effective_limit = (
-                        int(task_limit) if task_limit is not None
-                        else int(failure_limit)
-                    )
-                    if failures >= effective_limit:
-                        continue
-                    conn.execute(
-                        "UPDATE tasks SET status = ? "
-                        "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE tasks SET status = ? WHERE id = ? AND status = 'todo'",
-                        (resume_status, task_id),
-                    )
-                _append_event(
-                    conn, task_id, "promoted",
-                    {"status": resume_status} if resume_status != "ready" else None,
-                )
-                promoted += 1
+            resume_status = _resume_status_from_events(conn, task_id)
+            from hermes_cli.kanban_decision import decide
+            task = get_task(conn, task_id)
+            decision = decide(conn, task, status_override=resume_status) if task else None
+            if not decision or decision["workflow_stage"] not in {"READY", "REVIEW"}:
+                continue
+            target = "review" if decision["workflow_stage"] == "REVIEW" else "ready"
+            if not decision["dispatchable"]:
+                continue
+            if cur_status == "blocked":
+                # At the breaker limit, no auto-recovery (else block ->
+                # recover -> respawn -> exhaust -> block forever). The
+                # counter is preserved so it accumulates across cycles.
+                failures = int(row["consecutive_failures"] or 0)
+                task_limit = row["max_retries"]
+                effective_limit = int(task_limit) if task_limit is not None else int(failure_limit)
+                if failures >= effective_limit:
+                    continue
+            cur = conn.execute(
+                "UPDATE tasks SET status=? WHERE id=? AND status=?", (target, task_id, cur_status),
+            )
+            if cur.rowcount != 1:
+                continue
+            _append_event(conn, task_id, "promoted", {
+                "status": target,
+                "decision_fingerprint": decision["decision_fingerprint"],
+                "next_action": decision["next_action"],
+            })
+            promoted += 1
     return promoted
 
 
 # --- Claim / complete / block ---
 
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return whether every direct parent is terminal for dependency gating."""
-    return conn.execute(
-        "SELECT 1 FROM task_links l "
-        "JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = ? "
-        "AND p.status NOT IN ('done', 'archived') LIMIT 1", (task_id,),
-    ).fetchone() is None
+    """Return whether every named dependency requirement has accepted evidence."""
+    from hermes_cli.kanban_decision import dependencies_satisfied
+    return dependencies_satisfied(conn, task_id)
 
 
 def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, str]]:
@@ -2306,17 +2296,18 @@ def _claim_and_open_run(
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
-    from hermes_cli.kanban_administrative_hold import administrative_pending
-    from hermes_cli.kanban_completion_workflow import operator_contract_pending
-    if administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
+    from hermes_cli.kanban_decision import claim_allowed
+    task = get_task(conn, task_id)
+    allowed, decision = claim_allowed(
+        conn, task, "review" if source_status == "review" else "ready"
+    ) if task is not None else (False, None)
+    if not allowed:
+        _append_event(conn, task_id, "claim_rejected", {
+            "reason": decision["reason"] if decision else "task disappeared",
+            "workflow_stage": decision["workflow_stage"] if decision else None,
+            "decision_fingerprint": decision["decision_fingerprint"] if decision else None,
+        })
         return None
-    if source_status != 'review':
-        from hermes_cli.kanban_readiness import preparation_reason
-        reason = preparation_reason(conn, task_id)
-        if reason:
-            conn.execute("UPDATE tasks SET status='todo' WHERE id=? AND status='ready'", (task_id,))
-            _append_event(conn, task_id, 'claim_rejected', {'reason': reason})
-            return None
     cur = conn.execute(
         f"""
         UPDATE tasks
@@ -3418,7 +3409,7 @@ def block_task(
         if conn.execute(sql, params).rowcount != 1:
             return False
         run_id = _end_or_synthesize_run(
-            conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
+            conn, task_id, outcome="blocked", status=new_status, summary=reason, synthesize=bool(reason),
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
@@ -3738,10 +3729,16 @@ def promote_task(
             f"`hermes kanban unlink <parent_id> {task_id}`)"
         )
 
+    from hermes_cli.kanban_completion_workflow import authority_wait
+    if authority_wait(conn, task_id) is not None:
+        return False, 'waiting_for_authority'
+
     if dry_run:
         return True, None
 
     with write_txn(conn):
+        if authority_wait(conn, task_id) is not None:
+            return False, 'waiting_for_authority'
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready' "
             "WHERE id = ? AND status IN ('todo', 'blocked')", (task_id,),

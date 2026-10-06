@@ -60,6 +60,7 @@ import {
   useKanbanScope
 } from './api'
 import { ModelOverrideField, overridePatch } from './model-override'
+import { makePriorityWriter, PriorityEditor } from './priority-editor'
 import {
   type Diagnostic,
   type DiagnosticAction,
@@ -938,6 +939,24 @@ export function TaskDrawer({
       (err: unknown) => host.notify({ kind: 'error', message: errText(err) })
     )
 
+  // Priority write for the drawer's editor: PATCH the native field, then read
+  // the stored value back before the editor closes. A rejected write rethrows,
+  // so the editor keeps the operator's draft and the toast explains why.
+  const persistPriority = makePriorityWriter({
+    fetch: () => fetchTask(id!),
+    invalidate,
+    patch: body => patchTask(id!, body)
+  })
+  const priorityWriter = async (taskId: string, priority: number) => {
+    try {
+      return await persistPriority(taskId, priority)
+    } catch (err) {
+      host.notify({ kind: 'error', message: errText(err) })
+
+      throw err
+    }
+  }
+
   const commentMut = useMutation({
     mutationFn: (body: string) => addComment(id!, body),
     onError: err => host.notify({ kind: 'error', message: errText(err) }),
@@ -979,6 +998,12 @@ export function TaskDrawer({
   // Linked tasks resolved to titles by the backend (`link_tasks`); absent on
   // older backends, where the chips fall back to short ids.
   const linkTitles = new Map((detail?.link_tasks ?? []).map(linked => [linked.id, linked.title]))
+  const linkStatuses = new Map((detail?.link_tasks ?? []).map(linked => [linked.id, linked.status]))
+  // A completed prerequisite is provenance, not a current blocker.  Keep the
+  // persisted link in the graph, but never present it under "Blocked by".
+  const activeParentIds = (detail?.links.parents ?? []).filter(
+    id => !['done', 'archived'].includes(linkStatuses.get(id) ?? '')
+  )
 
   const move = (status: string) => {
     if (!task || status === task.status) {
@@ -1142,7 +1167,15 @@ export function TaskDrawer({
                 </MetaRow>
                 {typeof task.priority === 'number' && (
                   <MetaRow label={k.metaPriority}>
-                    <PriorityGlyph priority={task.priority} />
+                    {/* After-creation priority is native scheduling input, so
+                        the write goes through PATCH + a server readback rather
+                        than an optimistic local edit (see priority-editor.tsx
+                        for why the generic `mutate()` helper is not reused). */}
+                    <PriorityEditor
+                      onSave={priorityWriter}
+                      priority={task.priority}
+                      taskId={task.id}
+                    />
                   </MetaRow>
                 )}
                 {task.tenant && <MetaRow label={k.metaTenant}>{task.tenant}</MetaRow>}
@@ -1188,11 +1221,11 @@ export function TaskDrawer({
                     }}
                   />
                 </MetaRow>
-                {(detail.links.parents.length > 0 || detail.links.children.length > 0) &&
+                {(activeParentIds.length > 0 || detail.links.children.length > 0) &&
                   (['parents', 'children'] as const).map(side =>
-                    detail.links[side].length > 0 ? (
+                    (side === 'parents' ? activeParentIds : detail.links.children).length > 0 ? (
                       <MetaRow key={side} label={side === 'parents' ? k.blockedBy : k.blocks}>
-                        <LinkChips ids={detail.links[side]} linkTitles={linkTitles} onOpen={onOpen} />
+                        <LinkChips ids={side === 'parents' ? activeParentIds : detail.links.children} linkTitles={linkTitles} onOpen={onOpen} />
                       </MetaRow>
                     ) : null
                   )}

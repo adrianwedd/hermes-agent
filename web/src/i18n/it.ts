@@ -737,6 +737,9 @@ export const it: Translations = {
     selectForBulk: "Seleziona per azioni massive",
     clickToEdit: "Clicca per modificare",
     clickToEditAssignee: "Clicca per modificare l'assegnatario",
+    editPriority: "Cambia priorità",
+    editPriorityHint: "Cambia priorità. I numeri più alti vengono assegnati per primi dal dispatcher.",
+    priorityInvalid: "Inserisci un numero intero (0 è il valore predefinito; i più alti vengono assegnati per primi).",
     emptyAssignee: "(vuoto = rimuovi assegnazione)",
     columnLabels: {
       triage: "Triage",

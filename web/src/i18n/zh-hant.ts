@@ -737,6 +737,9 @@ export const zhHant: Translations = {
     selectForBulk: "選取以進行批次操作",
     clickToEdit: "點擊以編輯",
     clickToEditAssignee: "點擊以編輯負責人",
+    editPriority: "修改優先順序",
+    editPriorityHint: "修改優先順序。數值越大，排程器越先領取。",
+    priorityInvalid: "請輸入整數（0 為預設值，數值越大越先領取）。",
     emptyAssignee: "（留空 = 取消指派）",
     columnLabels: {
       triage: "待分類",

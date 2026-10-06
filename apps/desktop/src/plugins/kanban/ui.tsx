@@ -124,12 +124,25 @@ export type ArcState = 'queued' | 'running' | 'stale'
  * review) renders as the footer's named-agent chip — motion means work.
  */
 export function arcState(task: KanbanTask, fallbackAssignee: string): ArcState | null {
-  if (task.status === 'running') {
+  // The animation follows the DERIVED stage, not the raw status: a `ready` card the
+  // dispatcher refuses (operator hold, unresolved gate) must not pulse as "queued work".
+  const stage = task.card_facts?.dispatch?.stage
+  const lane = task.card_facts?.dispatch?.column ?? task.status
+
+  if (lane === 'running') {
     // No heartbeat for 2+ min = the worker may have died; the dispatcher will
     // reclaim it, but be honest instead of sweeping green forever.
     const stale = task.last_heartbeat_at ? Date.now() / 1000 - task.last_heartbeat_at > 120 : false
 
     return stale ? 'stale' : 'running'
+  }
+
+  if (stage === 'READY' || stage === 'REVIEW' || stage === 'TRIAGE') {
+    return 'queued'
+  }
+
+  if (stage) {
+    return null
   }
 
   const queued =

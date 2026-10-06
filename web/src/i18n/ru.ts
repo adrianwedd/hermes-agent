@@ -738,6 +738,9 @@ export const ru: Translations = {
     selectForBulk: "Выбрать для массовых действий",
     clickToEdit: "Нажмите, чтобы изменить",
     clickToEditAssignee: "Нажмите, чтобы изменить исполнителя",
+    editPriority: "Изменить приоритет",
+    editPriorityHint: "Изменить приоритет. Чем больше число, тем раньше диспетчер заберёт задачу.",
+    priorityInvalid: "Введите целое число (0 — по умолчанию; чем больше, тем раньше заберут).",
     emptyAssignee: "(пусто = снять назначение)",
     columnLabels: {
       triage: "Сортировка",

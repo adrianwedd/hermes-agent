@@ -746,6 +746,9 @@ export const ga: Translations = {
     selectForBulk: "Roghnaigh do ghníomhartha cnuasaigh",
     clickToEdit: "Cliceáil chun eagarthóireacht a dhéanamh",
     clickToEditAssignee: "Cliceáil chun an sannaí a chur in eagar",
+    editPriority: "Athraigh tosaíocht",
+    editPriorityHint: "Athraigh tosaíocht. Éilíonn an dispatcher na huimhreacha is airde ar dtús.",
+    priorityInvalid: "Cuir isteach slánuimhir (0 mar réamhshocrú; éilítear na cinn is airde ar dtús).",
     emptyAssignee: "(folamh = bain an sannadh)",
     columnLabels: {
       triage: "Triáiseáil",

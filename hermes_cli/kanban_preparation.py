@@ -120,6 +120,9 @@ def refusal(conn, task, contract, grant, facts):
         return 'stage_not_todo'
     if any(task[k] is not None for k in ('current_run_id', 'worker_pid', 'claim_lock')):
         return 'active_owner'
+    from hermes_cli.kanban_completion_workflow import authority_wait
+    if authority_wait(conn, task['id']) is not None:
+        return 'waiting_for_authority'
     if administrative_pending(conn, task['id']):
         return 'administrative_stop'
     if not isinstance(grant, dict) or grant.get('mode') != 'automatic' or grant.get('grant_qualification') is not True:
@@ -239,6 +242,7 @@ def prepare_task(conn, task_id, *, facts_loader=runtime_facts):
 
 def prepare_tick(conn, *, limit=1, scan_limit=64, facts_loader=runtime_facts):
     """Bounded existing TODO scan; no fanout, model call, or worker launch."""
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
     results = []
     prepared = 0
     rows = conn.execute("SELECT t.id FROM tasks t JOIN task_events e ON e.id=(SELECT max(id) "
@@ -249,11 +253,33 @@ def prepare_tick(conn, *, limit=1, scan_limit=64, facts_loader=runtime_facts):
                         "AND kind='preparation_checked'),0),t.priority DESC,t.created_at,t.id LIMIT ?",
                         (max(1, min(int(scan_limit), 128)),)).fetchall()
     for row in rows:
+        from hermes_cli.kanban_decision import decide
+        current_task = kb.get_task(conn, row[0])
+        current_decision = decide(conn, current_task) if current_task else None
+        latest = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='preparation_checked' "
+            "ORDER BY id DESC LIMIT 1", (row[0],),
+        ).fetchone()
+        try:
+            latest_payload = json.loads(latest[0] or '{}') if latest else {}
+        except (TypeError, ValueError):
+            latest_payload = {}
+        if (current_decision and latest_payload.get('decision_fingerprint') ==
+                current_decision['decision_fingerprint'] and
+                latest_payload.get('prepared') is False):
+            # Event-driven reassessment: an unchanged refusal is not useful
+            # work and must not produce one event/model/worker cycle per tick.
+            continue
         result = prepare_task(conn, row[0], facts_loader=facts_loader)
         results.append(result)
-        from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
         with kbc.write_txn(conn):
-            kb._append_event(conn, row[0], 'preparation_checked', {'reason': result['reason']})
+            refreshed = kb.get_task(conn, row[0])
+            refreshed_decision = decide(conn, refreshed) if refreshed else current_decision
+            kb._append_event(conn, row[0], 'preparation_checked', {
+                'reason': result['reason'], 'prepared': bool(result['prepared']),
+                'decision_fingerprint': refreshed_decision['decision_fingerprint']
+                if refreshed_decision else None,
+            })
         prepared += int(result['prepared'])
         if prepared >= max(1, min(int(limit), 1)):
             break

@@ -39,11 +39,16 @@ export function CardFacts({ task }: { task: KanbanTask }) {
   const progress = facts?.progress
   const run = facts.run_routes?.selected
   const queued = ['ready', 'todo', 'scheduled', 'triage'].includes(task.status)
+  // A finished card has a resolution, not progress. The backend withholds the
+  // value for terminal statuses (plugin_api.get_board, kanban_card_facts) and the
+  // row is skipped here too, so an older payload cannot re-introduce
+  // "Progress: Reviewed and approved …" under a completed card.
+  const terminal = facts.dispatch?.terminal ?? ['done', 'archived'].includes(task.status)
   return (
     <dl aria-label="Task evidence" className="flex min-w-0 flex-col gap-1 border-t border-(--ui-stroke-tertiary) pt-1.5 text-[0.6875rem] leading-snug text-(--ui-text-tertiary)">
       <DispatchFacts task={task} />
       {blocker && <div><dt className="inline font-medium">{blocker.label}: </dt><dd className="inline [overflow-wrap:anywhere]">{blocker.detail}</dd></div>}
-      <div title={progress?.basis}><dt className="inline font-medium">Progress: </dt><dd className="inline [overflow-wrap:anywhere]">{progress ? `${progress.text} · ${age(progress.at)}` : 'No worker update recorded'}</dd></div>
+      {!terminal && <div title={progress?.basis}><dt className="inline font-medium">Progress: </dt><dd className="inline [overflow-wrap:anywhere]">{progress ? `${progress.text} · ${age(progress.at)}` : 'No worker update recorded'}</dd></div>}
       {task.status === 'running' && <div><dt className="inline font-medium">Heartbeat: </dt><dd className="inline">{age(facts?.heartbeat_at ?? task.last_heartbeat_at)} · liveness only</dd></div>}
       <div title={facts?.tokens?.coverage}><dt className="inline font-medium">Recorded tokens: </dt><dd className="inline [overflow-wrap:anywhere]">{facts?.tokens?.current ? `${facts.tokens.current.counters_complete ? '' : '≥'}${facts.tokens.current.total.toLocaleString()} current run · ${facts.tokens.current.input.toLocaleString()} in / ${facts.tokens.current.output?.toLocaleString() ?? '?'} out · partial` : task.status === 'running' ? 'Current run unknown' : 'No active run'}{facts?.tokens?.cumulative ? ` · ${facts.tokens.cumulative.counters_complete ? '' : '≥'}${facts.tokens.cumulative.total.toLocaleString()} cumulative recorded · partial` : ' · cumulative unknown'}</dd></div>
       {task.task_estimate?.ok && <div title={task.task_estimate.rationale || undefined}><dt className="inline font-medium">Estimate: </dt><dd className="inline [overflow-wrap:anywhere]">~{task.task_estimate.est_tokens?.toLocaleString()} tokens{task.task_estimate.complexity ? ` · ${task.task_estimate.complexity}` : ''}{task.task_estimate.stale_scope ? ' · scope changed' : ''}</dd></div>}

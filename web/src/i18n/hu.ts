@@ -738,6 +738,9 @@ export const hu: Translations = {
     selectForBulk: "Kijelölés tömeges műveletekhez",
     clickToEdit: "Kattints a szerkesztéshez",
     clickToEditAssignee: "Kattints a felelős szerkesztéséhez",
+    editPriority: "Prioritás módosítása",
+    editPriorityHint: "Prioritás módosítása. A nagyobb számokat a dispatcher igényli először.",
+    priorityInvalid: "Adj meg egész számot (a 0 az alapértelmezett; a nagyobbat igényli először).",
     emptyAssignee: "(üres = felelős eltávolítása)",
     columnLabels: {
       triage: "Triázs",

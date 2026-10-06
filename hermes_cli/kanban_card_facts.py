@@ -26,7 +26,7 @@ def model_facts(config,task,preset_resolver):
 
 def card_facts(conn,tasks,config_for,preset_resolver):
     from hermes_cli.kanban_delivery_receipts import delivery_facts
-    from hermes_cli.kanban_dispatch_facts import dispatch_facts
+    from hermes_cli.kanban_dispatch_facts import TERMINAL_STATUSES, dispatch_facts
     result={};configs={}
     for task in tasks:
         t=dict(task);tid=t['id'];status=t['status'];reason=None
@@ -41,16 +41,21 @@ def card_facts(conn,tasks,config_for,preset_resolver):
         failure=text(t.get('last_failure_error')) if status=='blocked' and not reason else None
         wait={'todo':'Awaiting preparation','ready':'Awaiting dispatch','scheduled':'Awaiting scheduled time','triage':'Awaiting specification'}.get(status)
         blocker={'label':'Blocker' if reason else 'Last recorded failure' if failure else 'Blocker unknown','detail':reason or failure or 'No explicit blocker evidence recorded'} if status=='blocked' else ({'label':'Waiting','detail':wait} if wait else None)
-        # Only explicit worker comments from the current run count as progress.
+        # A terminal card's retained run summary is HISTORY, not progress: rendered
+        # as "Progress: …" under a finished card it reads as work still in flight.
+        # Withhold it for terminal statuses, the same way plugin_api.get_board
+        # withholds the child rollup. Only explicit worker comments from the
+        # current run count as progress.
         progress=None
-        if t.get('assignee') and t.get('current_run_id'):
-            run=conn.execute('SELECT started_at FROM task_runs WHERE id=?',(t['current_run_id'],)).fetchone()
-            if run:
-                note=conn.execute('SELECT body,created_at FROM task_comments WHERE task_id=? AND author=? AND created_at>=? ORDER BY id DESC LIMIT 1',(tid,t['assignee'],run[0])).fetchone()
-                if note:progress={'text':text(note[0]),'at':note[1],'basis':'Worker comment during current run'}
-        if not t.get('current_run_id'):
-            run=conn.execute("SELECT summary,ended_at FROM task_runs WHERE task_id=? AND summary IS NOT NULL ORDER BY id DESC LIMIT 1",(tid,)).fetchone()
-            if run and run[0]:progress={'text':text(run[0]),'at':run[1],'basis':'Latest retained run handoff'}
+        if status not in TERMINAL_STATUSES:
+            if t.get('assignee') and t.get('current_run_id'):
+                run=conn.execute('SELECT started_at FROM task_runs WHERE id=?',(t['current_run_id'],)).fetchone()
+                if run:
+                    note=conn.execute('SELECT body,created_at FROM task_comments WHERE task_id=? AND author=? AND created_at>=? ORDER BY id DESC LIMIT 1',(tid,t['assignee'],run[0])).fetchone()
+                    if note:progress={'text':text(note[0]),'at':note[1],'basis':'Worker comment during current run'}
+            if not t.get('current_run_id'):
+                run=conn.execute("SELECT summary,ended_at FROM task_runs WHERE task_id=? AND summary IS NOT NULL ORDER BY id DESC LIMIT 1",(tid,)).fetchone()
+                if run and run[0]:progress={'text':text(run[0]),'at':run[1],'basis':'Latest retained run handoff'}
         owner=t.get('assignee')
         if owner not in configs:
             try:configs[owner]=config_for(owner or 'default')

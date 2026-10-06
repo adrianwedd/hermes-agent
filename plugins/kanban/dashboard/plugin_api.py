@@ -331,9 +331,16 @@ def get_board(
             d["card_facts"]["run_routes"] = run_routes(conn, asdict(t), native_read_session)
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
-            d["progress"] = progress.get(t.id)  # None when the task has no children
+            # A terminal card's child rollup is history: "3/5 done" under a finished
+            # card reads as unfinished work still in flight. Withhold it so the UI
+            # cannot show stale progress on completed cards.
+            d["progress"] = None if t.status in ("done", "archived") else progress.get(t.id)
             _attach_diagnostics(d, diagnostics_per_task.get(t.id))
-            columns[t.status if t.status in columns else "todo"].append(d)
+            # Bucket by the DERIVED stage, not the raw status: a card the dispatcher
+            # refuses (operator hold, unqualified scope, unresolved gate) must not sit
+            # in Ready or Review under a tile that contradicts its own card_facts.
+            column = d["card_facts"]["dispatch"]["column"]
+            columns[column if column in columns else "todo"].append(d)
 
         # Queue lanes keep the list_tasks dispatch order; the done column is
         # history, so order it newest-completed-first. Two stable sorts compose

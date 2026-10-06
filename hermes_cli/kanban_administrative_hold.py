@@ -10,11 +10,43 @@ import os
 
 
 def administrative_pending(conn, task_id: str) -> bool:
-    # This event has no release form. Even a damaged payload must remain a stop.
-    return conn.execute(
-        "SELECT 1 FROM task_events WHERE task_id=? AND kind='administrative_pending' LIMIT 1",
+    """Return whether the latest administrative-hold decision is pending.
+
+    Holds are historical events, not permanent task identity. An explicit
+    release supersedes an earlier pending event without deleting its audit.
+    """
+    row = conn.execute(
+        "SELECT kind FROM task_events WHERE task_id=? "
+        "AND kind IN ('administrative_pending','administrative_pending_released') "
+        "ORDER BY id DESC LIMIT 1",
         (task_id,),
-    ).fetchone() is not None
+    ).fetchone()
+    return row is not None and row[0] == "administrative_pending"
+
+
+def release_administrative_pending(conn, task_id: str, *, reason: str, board: str | None = None) -> bool:
+    """Mechanically release obsolete receipt administration after evidence repair."""
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        raise PermissionError("Workers cannot release operator administrative holds")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("A release reason is required")
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import write_txn
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status,current_run_id,worker_pid,claim_lock FROM tasks WHERE id=?", (task_id,),
+        ).fetchone()
+        if row is None or row[0] in ("done", "archived") or any(x is not None for x in row[1:]):
+            return False
+        if not administrative_pending(conn, task_id):
+            return False
+        conn.execute("UPDATE tasks SET dispatch_eligible=1 WHERE id=?", (task_id,))
+        kb._append_event(conn, task_id, "administrative_pending_released", {
+            "reason": reason.strip(), "dispatch_eligible": True,
+        })
+    kb.recompute_ready(conn)
+    kb.notify_task_updated(conn, task_id, ["dispatch_eligible", "administrative_pending"], board=board)
+    return True
 
 
 def set_administrative_pending(

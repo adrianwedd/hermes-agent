@@ -739,6 +739,9 @@ export const uk: Translations = {
     selectForBulk: "Вибрати для масових дій",
     clickToEdit: "Клікніть, щоб редагувати",
     clickToEditAssignee: "Клікніть, щоб редагувати виконавця",
+    editPriority: "Змінити пріоритет",
+    editPriorityHint: "Змінити пріоритет. Більше число — диспетчер забере завдання раніше.",
+    priorityInvalid: "Введіть ціле число (0 — типове; більше — заберуть раніше).",
     emptyAssignee: "(порожньо = зняти призначення)",
     columnLabels: {
       triage: "Сортування",
