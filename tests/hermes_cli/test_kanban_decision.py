@@ -94,6 +94,57 @@ def test_t_6a127187_authority_grant_atomically_releases_existing_card(board):
     assert decide(board, released)["workflow_stage"] == "READY"
 
 
+def test_legacy_todo_disabled_wait_is_normalized_then_released(board):
+    tid = _task(board, "legacy disabled authority wait", status="todo", eligible=False)
+    contract = _contract(board, tid, selected_next_action={
+        "phase": "WAITING_FOR_AUTHORITY", "type": "live_experiment",
+        "action": "Grant the live experiment window", "resolver": "Adrian",
+        "resume_condition": "operator grant is recorded",
+    })
+    assert decide(board, kb.get_task(board, tid))["workflow_stage"] == "WAITING"
+    assert kb.recompute_ready(board) == 1
+    normalized = kb.get_task(board, tid)
+    assert (normalized.status, normalized.dispatch_eligible) == ("todo", True)
+
+    released_contract = dict(contract)
+    released_contract["selected_next_action"] = {
+        "phase": "READY", "type": "worker_action", "action": "Run the experiment",
+    }
+    kb._append_event(board, tid, "completion_requirements", released_contract)
+    kb._append_event(board, tid, "operator_authority_granted", {"authority": "window"})
+    assert kb.recompute_ready(board) == 1
+    released = kb.get_task(board, tid)
+    assert (released.status, released.dispatch_eligible) == ("ready", True)
+
+
+def test_authority_wait_semantics_outrank_execution_health(board, monkeypatch):
+    import hermes_cli.kanban_decision as decision_module
+
+    tid = _task(board, "authority-gated action with old infra fault", status="ready")
+    _contract(board, tid, selected_next_action={
+        "phase": "WAITING_FOR_AUTHORITY", "type": "live_experiment",
+        "action": "Grant authority", "resolver": "Adrian",
+        "resume_condition": "authority is recorded",
+    })
+    now = int(time.time())
+    board.execute(
+        "INSERT INTO task_runs(task_id,profile,status,started_at,ended_at,outcome,error,metadata) "
+        "VALUES(?,?,'crashed',?,?, 'crashed',?,?)",
+        (tid, "worker", now - 2, now - 1,
+         "no dependency environment is committed for this install",
+         json.dumps({"infrastructure": True, "environment_fingerprint": "same"})),
+    )
+    monkeypatch.setattr(decision_module, "environment_fingerprint", lambda: {
+        "identity": "same", "healthy": False,
+    })
+    decision = decide(board, kb.get_task(board, tid))
+    assert decision["workflow_stage"] == "WAITING"
+    assert decision["owner"] == "Adrian"
+    assert decision["next_action"] == "Grant authority"
+    assert decision["resume_condition"] == "authority is recorded"
+    assert decision["execution_health"]["state"] == "INFRASTRUCTURE_FAULT"
+
+
 def test_explicit_stop_outranks_unfinished_dependency(board):
     parent = _task(board, "unfinished prerequisite", status="todo")
     stopped = _task(board, "operator stopped programme", status="blocked", eligible=False)

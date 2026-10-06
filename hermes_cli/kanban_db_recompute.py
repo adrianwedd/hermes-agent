@@ -54,7 +54,25 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                 "BLOCKED": "blocked",
             }
             target = targets.get(stage)
-            if target is None or target == current:
+            desired_eligible = int(decision["dispatchable"] or stage == "WAITING")
+            if target is None:
+                continue
+            if target == current:
+                if int(task.dispatch_eligible) == desired_eligible:
+                    continue
+                updated = conn.execute(
+                    "UPDATE tasks SET dispatch_eligible=? WHERE id=? AND status=?",
+                    (desired_eligible, task_id, current),
+                )
+                if updated.rowcount:
+                    kb._append_event(conn, task_id, "decision_reconciled", {
+                        "previous_status": current, "status": current,
+                        "workflow_stage": stage,
+                        "decision_fingerprint": decision["decision_fingerprint"],
+                        "next_action": decision["next_action"],
+                        "dispatch_eligible": bool(desired_eligible),
+                    })
+                    changed += 1
                 continue
             if stage in {"READY", "REVIEW"} and not decision["dispatchable"]:
                 continue
@@ -71,7 +89,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                 # recompute directly to READY instead of sealing itself in a
                 # stale Todo+disabled hold. The claim boundary still rejects
                 # WAITING because it consumes this same canonical decision.
-                (target, int(decision["dispatchable"] or stage == "WAITING"), task_id, current),
+                (target, desired_eligible, task_id, current),
             )
             if updated.rowcount != 1:
                 continue

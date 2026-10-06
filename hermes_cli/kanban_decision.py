@@ -335,16 +335,6 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
             resume_condition=operator_decision.get("resume_condition") or
             "operator records the decision",
         )
-    elif health["state"] == "INFRASTRUCTURE_FAULT" and status in {"ready", "review"}:
-        semantic = "REVIEW" if status == "review" else "READY"
-        decision.update(
-            workflow_stage=semantic, dispatchable=False, worker_executable_now=False,
-            reason="Semantic action remains valid; deterministic launch environment is unhealthy",
-            owner=t.get("assignee"),
-            next_action="Run independent review" if semantic == "REVIEW" else
-            (selected.get("action") or "Run the authorised action"),
-            resume_condition="execution environment fingerprint changes",
-        )
     elif administrative_pending(conn, task_id):
         event = _latest_event(conn, task_id, ("administrative_pending",))
         payload = _json(event[2]) if event else {}
@@ -387,6 +377,16 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
             current_next_action_type=condition.get("type") or selected.get("type") or "external_condition",
             resume_condition=condition.get("resume_condition") or selected.get("resume_condition") or
             f"external condition {condition['condition_id']} is satisfied",
+        )
+    elif health["state"] == "INFRASTRUCTURE_FAULT" and status in {"ready", "review"}:
+        semantic = "REVIEW" if status == "review" else "READY"
+        decision.update(
+            workflow_stage=semantic, dispatchable=False, worker_executable_now=False,
+            reason="Semantic action remains valid; deterministic launch environment is unhealthy",
+            owner=t.get("assignee"),
+            next_action="Run independent review" if semantic == "REVIEW" else
+            (selected.get("action") or "Run the authorised action"),
+            resume_condition="execution environment fingerprint changes",
         )
     else:
         explicitly_unqualified = contract.get("qualified_for_dispatch") is False
