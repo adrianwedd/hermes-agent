@@ -665,6 +665,38 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         assert kb.get_task(conn, t2).status == "blocked"
 
 
+def test_recompute_ready_materializes_contract_before_promoting_scratch_task(kanban_home):
+    """A new scratch Todo must not deadlock between contract and workspace gates.
+
+    The control plane owns contract bookkeeping before promotion, while the
+    scratch directory is allocated later at claim time.
+    """
+    from hermes_cli.kanban_completion_evidence import contract_record, validate_contract
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Inspect retained evidence",
+            body="Review the retained report and record the bounded verdict.",
+            assignee="reviewer",
+            workspace_kind="scratch",
+            initial_status="blocked",
+        )
+        conn.execute(
+            "UPDATE tasks SET status='todo', dispatch_eligible=1, block_kind=NULL WHERE id=?",
+            (task_id,),
+        )
+        conn.commit()
+        assert kb.get_task(conn, task_id).workspace_path is None
+
+        assert kb.recompute_ready(conn) == 1
+        assert kb.get_task(conn, task_id).status == "ready"
+        contract_event, contract = contract_record(conn, task_id)
+        assert contract_event is not None
+        assert validate_contract(contract) == contract
+        assert contract["materialized_by"] == "control_plane_pre_promotion"
+
+
 
 
 # ---------------------------------------------------------------------------

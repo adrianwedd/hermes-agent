@@ -4,7 +4,7 @@ from pathlib import Path
 
 def preparation_reason(conn, task_id):
     from hermes_cli.kanban_completion_evidence import contract_record, validate_contract
-    row = conn.execute('SELECT workspace_path,status,idempotency_key FROM tasks WHERE id=?', (task_id,)).fetchone()
+    row = conn.execute('SELECT workspace_path,status,idempotency_key,workspace_kind FROM tasks WHERE id=?', (task_id,)).fetchone()
     if row is None:
         return 'Unknown task'
     _, contract = contract_record(conn, task_id)
@@ -19,6 +19,11 @@ def preparation_reason(conn, task_id):
         return 'Preparation required: declare the original-scope completion contract'
     if contract.get('qualified_for_dispatch') is not True:
         return 'Preparation required: operator qualification of original scope and acceptance'
+    # Scratch is the native no-checkout lane for research, review and preparation.
+    # Its directory is allocated when the task is claimed; requiring it to exist
+    # before Todo can become Ready creates an impossible promotion/claim cycle.
+    if row[3] == 'scratch':
+        return ''
     path = row[0]
     if not path or not Path(path).is_dir():
         return 'Preparation required: resolve the owned source or evidence workspace'

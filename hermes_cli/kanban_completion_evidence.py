@@ -193,18 +193,20 @@ def _refuse(conn, task_id, missing, *, expected_snapshot=None):
                 for reason in missing
             )
         if operator_declaration_pending:
-            conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=?", (task_id,))
+            # Missing closure metadata is not a dispatch hold.  Preserve the
+            # handoff and let Review resolve it without manufacturing Blocked.
+            conn.execute("UPDATE tasks SET dispatch_eligible=1 WHERE id=?", (task_id,))
             kb._append_event(conn, task_id, "operator_contract_handoff", {
-                "automatic_retry": False, "dispatch_eligible": False,
+                "automatic_retry": False, "dispatch_eligible": True,
                 "operator_action_required": True,
             })
         if operator_review_pending:
             # A worker requesting independent review must remain eligible for
             # that lane. Only a completed review awaiting operator approval is
-            # parked; existing manual/admin eligibility holds are never lifted.
+            # retained in Review; it is never converted into a generic hold.
             if expected_snapshot[0] == 'review':
-                conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=?", (task_id,))
-                kb._append_event(conn, task_id, 'operator_review_handoff', {'automatic_retry': False, 'dispatch_eligible': False})
+                conn.execute("UPDATE tasks SET dispatch_eligible=1 WHERE id=?", (task_id,))
+                kb._append_event(conn, task_id, 'operator_review_handoff', {'automatic_retry': False, 'dispatch_eligible': True})
             else:
                 kb._append_event(conn, task_id, 'independent_review_required', {'automatic_implementation_retry': False, 'review_dispatch_allowed_if_eligible': True})
         kb._append_event(

@@ -10,11 +10,19 @@ import os
 
 
 def administrative_pending(conn, task_id: str) -> bool:
-    # This event has no release form. Even a damaged payload must remain a stop.
-    return conn.execute(
-        "SELECT 1 FROM task_events WHERE task_id=? AND kind='administrative_pending' LIMIT 1",
+    """Return whether the latest administrative-hold decision is pending.
+
+    Holds are historical events, not permanent task identity.  An explicit
+    ``administrative_pending_released`` event supersedes an earlier pending
+    event without deleting its audit trail.
+    """
+    row = conn.execute(
+        "SELECT kind FROM task_events WHERE task_id=? "
+        "AND kind IN ('administrative_pending','administrative_pending_released') "
+        "ORDER BY id DESC LIMIT 1",
         (task_id,),
-    ).fetchone() is not None
+    ).fetchone()
+    return row is not None and row[0] == "administrative_pending"
 
 
 def set_administrative_pending(

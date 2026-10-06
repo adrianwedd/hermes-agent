@@ -248,7 +248,7 @@ export const en: KanbanMessages = {
   },
   arcRunning: 'An agent is working on this now.',
   arcStale: 'Claimed, but no worker heartbeat for 2+ minutes — the dispatcher will reclaim it.',
-  dispatch: { heading: 'Dispatch eligibility', held: 'Held · dispatch disabled', enabled: 'Dispatch eligibility enabled', unavailable: 'Dispatch state unavailable', disabledReason: 'dispatch_eligible=false; named reason has not been supplied by this backend', enabledReason: 'dispatch_eligible=true; other admission gates may still apply', missingReason: 'Backend did not serialize dispatch eligibility', owner: name => `Owner: ${name}`, next: action => `Next: ${action}` },
+  dispatch: { heading: 'Dispatch eligibility', held: 'Not dispatchable', enabled: 'Dispatch eligibility enabled', unavailable: 'Dispatch state unavailable', disabledReason: 'No worker action is currently dispatchable; the card state must name the actual next action', enabledReason: 'dispatch_eligible=true; other admission gates may still apply', missingReason: 'Backend did not serialize dispatch eligibility', owner: name => `Owner: ${name}`, next: action => `Next: ${action}` },
   title: 'Kanban',
   orchestrationSettings: 'Orchestration settings',
   newTask: 'New task',

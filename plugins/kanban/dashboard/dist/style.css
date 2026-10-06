@@ -766,6 +766,21 @@
 }
 .hermes-kanban-edit-link:hover { color: var(--color-ring); }
 
+/* After-creation priority editing. The edit affordance sits beside the value
+   (it is a real <button>, so it is a tab stop); the refusal copy is styled like
+   the other advisory rows rather than as a field error, since a refused draft
+   writes nothing. */
+.hermes-kanban-priority-edit {
+  margin-left: 0.35rem;
+  letter-spacing: 0.02em;
+}
+.hermes-kanban-priority-invalid {
+  flex-basis: 100%;
+  color: var(--color-destructive, #d14a4a);
+  font-size: 0.65rem;
+  line-height: 1.35;
+}
+
 .hermes-kanban-textarea {
   width: 100%;
   min-height: 8rem;

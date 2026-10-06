@@ -2044,9 +2044,15 @@ def _dispatch_lane_task(
     task_id = row["id"]
     task = _kb.get_task(conn, task_id)
     from hermes_cli.kanban_administrative_hold import administrative_pending
-    from hermes_cli.kanban_completion_workflow import operator_contract_pending
-    if task is None or not task.dispatch_eligible or administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
-        result.respawn_guarded.append((task_id, "dispatch_eligible=false or administrative_pending"))
+    from hermes_cli.kanban_completion_workflow import ensure_scope_contract, operator_contract_pending
+    if task is not None and not dry_run:
+        ensure_scope_contract(conn, task_id, authority='control_plane_pre_dispatch')
+    # No substantive worker or reviewer starts without a provenance-bound
+    # contract. Missing metadata is repaired here, before claim, never after
+    # implementation as an operator receipt ceremony.
+    completion_gate_blocks = task is not None and operator_contract_pending(conn, task_id)
+    if task is None or not task.dispatch_eligible or administrative_pending(conn, task_id) or completion_gate_blocks:
+        result.respawn_guarded.append((task_id, "dispatch eligibility, administrative hold, or non-review completion gate"))
         return False
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
     # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready

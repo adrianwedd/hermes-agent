@@ -2228,7 +2228,11 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
         for row in todo_rows:
             task_id = row["id"]
             from hermes_cli.kanban_administrative_hold import administrative_pending
-            from hermes_cli.kanban_completion_workflow import operator_contract_pending
+            from hermes_cli.kanban_completion_workflow import ensure_scope_contract, operator_contract_pending
+            # Contract bookkeeping belongs to the control plane and must happen
+            # before readiness is evaluated. Deferring it until claim leaves
+            # eligible Todo cards unable to reach the claim boundary at all.
+            ensure_scope_contract(conn, task_id, authority='control_plane_pre_promotion')
             if administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
                 continue
             from hermes_cli.kanban_readiness import preparation_reason
@@ -3418,7 +3422,7 @@ def block_task(
         if conn.execute(sql, params).rowcount != 1:
             return False
         run_id = _end_or_synthesize_run(
-            conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
+            conn, task_id, outcome="blocked", status=new_status, summary=reason, synthesize=bool(reason),
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
@@ -3738,10 +3742,16 @@ def promote_task(
             f"`hermes kanban unlink <parent_id> {task_id}`)"
         )
 
+    from hermes_cli.kanban_completion_workflow import authority_wait
+    if authority_wait(conn, task_id) is not None:
+        return False, 'waiting_for_authority'
+
     if dry_run:
         return True, None
 
     with write_txn(conn):
+        if authority_wait(conn, task_id) is not None:
+            return False, 'waiting_for_authority'
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready' "
             "WHERE id = ? AND status IN ('todo', 'blocked')", (task_id,),

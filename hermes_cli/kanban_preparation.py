@@ -120,6 +120,9 @@ def refusal(conn, task, contract, grant, facts):
         return 'stage_not_todo'
     if any(task[k] is not None for k in ('current_run_id', 'worker_pid', 'claim_lock')):
         return 'active_owner'
+    from hermes_cli.kanban_completion_workflow import authority_wait
+    if authority_wait(conn, task['id']) is not None:
+        return 'waiting_for_authority'
     if administrative_pending(conn, task['id']):
         return 'administrative_stop'
     if not isinstance(grant, dict) or grant.get('mode') != 'automatic' or grant.get('grant_qualification') is not True:
