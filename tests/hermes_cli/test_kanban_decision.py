@@ -94,6 +94,22 @@ def test_t_6a127187_authority_grant_atomically_releases_existing_card(board):
     assert decide(board, released)["workflow_stage"] == "READY"
 
 
+def test_explicit_stop_outranks_unfinished_dependency(board):
+    parent = _task(board, "unfinished prerequisite", status="todo")
+    stopped = _task(board, "operator stopped programme", status="blocked", eligible=False)
+    board.execute("UPDATE tasks SET block_kind='explicit_stop' WHERE id=?", (stopped,))
+    _contract(board, parent)
+    _contract(board, stopped, selected_next_action={
+        "action": "run the programme", "type": "worker_action",
+    })
+    kb.link_tasks(board, parent, stopped)
+    decision = decide(board, kb.get_task(board, stopped))
+    assert decision["workflow_stage"] == "HELD"
+    assert decision["block_kind"] == "explicit_stop"
+    assert decision["dispatchable"] is False
+    assert decision["resume_condition"] == "operator explicitly revokes the stop"
+
+
 def test_t_e5d24de5_review_flag_and_claim_guard_cannot_disagree(board):
     tid = _task(board, "dashboard review", status="review", eligible=False)
     _contract(board, tid)

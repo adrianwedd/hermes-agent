@@ -309,6 +309,13 @@ def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, 
                         reason="A live claim owns the current action",
                         owner=t.get("assignee"), next_action="Await the current owner handoff",
                         resume_condition="current claim ends")
+    elif status == "blocked" and t.get("block_kind") == "explicit_stop":
+        decision.update(
+            workflow_stage="HELD", block_kind="explicit_stop",
+            reason="Operator explicit stop remains in force",
+            owner="operator", next_action="Preserve the stopped state",
+            resume_condition="operator explicitly revokes the stop",
+        )
     elif health["state"] == "INFRASTRUCTURE_FAULT" and status in {"ready", "review"}:
         semantic = "REVIEW" if status == "review" else "READY"
         decision.update(
