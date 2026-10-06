@@ -24,8 +24,6 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             task_id = row["id"]
             ensure_scope_contract(conn, task_id, authority="control_plane_pre_promotion")
             current = row["status"]
-            if current == "blocked" and kb._has_sticky_block(conn, task_id):
-                continue
             task = kb.get_task(conn, task_id)
             override = kb._resume_status_from_events(conn, task_id) if current in {"todo", "blocked"} else None
             decision = decide(conn, task, status_override=override) if task else None
@@ -47,6 +45,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                         "remaining_required_actions": [],
                     })
                     changed += 1
+                continue
+            if current == "blocked" and kb._has_sticky_block(conn, task_id):
                 continue
             targets = {
                 "TRIAGE": "triage", "PREPARE": "todo", "READY": "ready",

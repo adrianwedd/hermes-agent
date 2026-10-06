@@ -431,7 +431,11 @@ def test_completed_scope_ignores_stale_selected_action(board):
 
 
 def test_completed_truth_closes_stale_blocked_state(board):
-    tid = _task(board, "accepted work left blocked", status="blocked", eligible=False)
+    tid = _task(board, "accepted work left blocked", status="ready")
+    _contract(board, tid)
+    assert kb.block_task(
+        board, tid, reason="operator input was previously needed", kind="needs_input",
+    ) is True
     _contract(
         board, tid,
         accepted_completed_actions=["bounded scope accepted"],
