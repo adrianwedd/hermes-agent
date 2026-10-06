@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
@@ -29,13 +30,23 @@ def infrastructure_error(error: str) -> bool:
     return any(marker in lowered for marker in INFRA_ERROR_MARKERS)
 
 
-def environment_fingerprint() -> dict[str, Any]:
+def _workspace_install_root(workspace_path: str | None) -> Path | None:
+    """Return a task-local Hermes source root when its cwd shadows the host install."""
+    if not workspace_path:
+        return None
+    root = Path(workspace_path).resolve()
+    if (root / "hermes_bootstrap.py").is_file() and (root / "hermes_cli").is_dir():
+        return root
+    return None
+
+
+def environment_fingerprint(root_override: str | Path | None = None) -> dict[str, Any]:
     """Current install dependency identity, read without repairing or mutating it."""
     try:
         from pm.environments import committed_venv, runtime_facts_path
         from pm.paths import install_root
 
-        root = install_root().resolve()
+        root = Path(root_override).resolve() if root_override else install_root().resolve()
         facts = runtime_facts_path(root)
         environment = committed_venv(root)
         payload = facts.read_bytes() if facts.is_file() else b""
@@ -56,6 +67,12 @@ def environment_fingerprint() -> dict[str, Any]:
             "healthy": False,
             "reason": str(exc),
         }
+
+
+def execution_environment_fingerprint(workspace_path: str | None = None) -> dict[str, Any]:
+    """Fingerprint the install a worker launched from this workspace will import."""
+    workspace_root = _workspace_install_root(workspace_path)
+    return environment_fingerprint(workspace_root) if workspace_root else environment_fingerprint()
 
 
 def _mapping(task: Any) -> dict[str, Any]:
@@ -204,7 +221,10 @@ def _execution_health(conn, task_id: str) -> dict[str, Any]:
         return {"state": "UNKNOWN", "reason": None, "retry_after": None}
     error = str(row[3] or "")
     if infrastructure_error(error):
-        current = environment_fingerprint()
+        workspace_row = conn.execute(
+            "SELECT workspace_path FROM tasks WHERE id=?", (task_id,),
+        ).fetchone()
+        current = execution_environment_fingerprint(workspace_row[0] if workspace_row else None)
         metadata_row = conn.execute(
             "SELECT metadata FROM task_runs WHERE id=?", (row[0],),
         ).fetchone()

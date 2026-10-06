@@ -1048,6 +1048,7 @@ class _DeadWorker:
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
+    workspace_path: Optional[str] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -1061,11 +1062,12 @@ def _classify_dead_worker(
         if worker_output:
             dead.error_text += f" Worker's last output: {worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
-        from hermes_cli.kanban_decision import environment_fingerprint, infrastructure_error
+        from hermes_cli.kanban_decision import execution_environment_fingerprint, infrastructure_error
         if infrastructure_error(dead.error_text):
             dead.infrastructure = True
             dead.event_payload["infrastructure"] = True
-            dead.event_payload["environment_fingerprint"] = environment_fingerprint().get("identity")
+            fingerprint = execution_environment_fingerprint(workspace_path)
+            dead.event_payload["environment_fingerprint"] = fingerprint.get("identity")
     return dead
 
 
@@ -1155,7 +1157,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee "
+            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, workspace_path "
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
@@ -1173,7 +1175,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 continue
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
+            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board,
+                                         workspace_path=row["workspace_path"])
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
