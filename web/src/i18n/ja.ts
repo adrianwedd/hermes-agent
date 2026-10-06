@@ -736,6 +736,9 @@ export const ja: Translations = {
     reassignFailed: "再割り当てに失敗しました: ",
     selectForBulk: "一括操作のために選択",
     clickToEdit: "クリックして編集",
+    editPriority: "優先度を変更",
+    editPriorityHint: "優先度を変更。数値が大きいほどディスパッチャに先に取得されます。",
+    priorityInvalid: "整数を入力してください。0 が既定で、大きいほど先に取得されます。",
     clickToEditAssignee: "クリックして担当者を編集",
     emptyAssignee: "（空 = 割り当て解除）",
     columnLabels: {

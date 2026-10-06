@@ -3666,8 +3666,18 @@
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(finalPatch),
-        }).then(function () { load(); props.onRefresh(); })
-          .catch(function (e) { setPatchErr(parseApiErrorMessage(e)); });
+        }).then(function () {
+          if (Object.prototype.hasOwnProperty.call(finalPatch, "priority")) {
+            // Priority saves settle only after persisted server readback.
+            return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}`, boardSlug))
+              .then(function (d) { setData(d); setErr(null); setPatchErr(null); props.onRefresh(); });
+          }
+          load(); props.onRefresh();
+        }).catch(function (e) {
+          setPatchErr(parseApiErrorMessage(e));
+          // Let the priority editor retain its draft on PATCH or GET refusal.
+          if (Object.prototype.hasOwnProperty.call(finalPatch, "priority")) throw e;
+        });
       }
     };
 
@@ -4398,35 +4408,108 @@
     );
   }
 
+  // Priority is native scheduling input, not decoration: `list_tasks` and both
+  // dispatcher lanes order by `priority DESC, created_at ASC`, so a higher
+  // integer is claimed first. Three things this editor therefore has to get
+  // right, each of which the previous mouse-only version got wrong:
+  //
+  //   1. Reachable without a mouse. The old trigger was a `span` with onClick —
+  //      no tab stop, no key activation, so the control did not exist for
+  //      keyboard or screen-reader operators.
+  //   2. Strict input. `Number(v) || 0` turned a blank or fractional draft into
+  //      a silent 0 — a DEMOTION of a card the operator was trying to raise.
+  //      An unparseable draft now refuses the write and says why.
+  //   3. No swallowed failure. The old `save()` ignored a rejected promise, so
+  //      a 409 closed the editor as if it had saved. A rejection keeps the
+  //      draft open; `doPatch` already surfaces the reason next to the actions.
+  function parsePriorityValue(raw) {
+    const text = String(raw == null ? "" : raw).trim();
+    // Decimals, exponents, hex and digit separators are NOT priorities.
+    if (!/^[+-]?\d+$/.test(text)) return null;
+    const value = Number(text);
+    return Number.isSafeInteger(value) ? value : null;
+  }
+
   function PriorityEditor(props) {
     const { t } = useI18n();
     const [editing, setEditing] = useState(false);
     const [v, setV] = useState(String(props.task.priority || 0));
-    useEffect(function () { setV(String(props.task.priority || 0)); }, [props.task.priority]);
+    const [invalid, setInvalid] = useState(false);
+    const [saving, setSaving] = useState(false);
+    // React state has not flushed inside one keydown, so a second Enter in the
+    // same tick would fire a duplicate PATCH; a ref closes that window.
+    const inFlight = useRef(false);
+    useEffect(function () {
+      if (!editing) {
+        setV(String(props.task.priority || 0));
+        setInvalid(false);
+      }
+    }, [editing, props.task.priority]);
+
+    const open = function () { setEditing(true); setInvalid(false); };
+    const cancel = function () {
+      setEditing(false);
+      setInvalid(false);
+      setV(String(props.task.priority || 0));
+    };
+    const save = function () {
+      if (inFlight.current) return;
+      const parsed = parsePriorityValue(v);
+      if (parsed === null) { setInvalid(true); return; }
+      setInvalid(false);
+      inFlight.current = true;
+      setSaving(true);
+      // onPatch reports its own failure inline (patchErr); resolve AND reject
+      // both settle here so the control never stays latched in "saving".
+      props.onPatch({ priority: parsed }).then(function () {
+        inFlight.current = false;
+        setSaving(false);
+        setEditing(false);
+      }, function () {
+        inFlight.current = false;
+        setSaving(false);
+      });
+    };
+    const keyDown = function (e) {
+      if (e.key === "Enter") { e.preventDefault(); save(); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancel(); }
+    };
+
     if (!editing) {
       return h("div", { className: "hermes-kanban-meta-row" },
         h("span", { className: "hermes-kanban-meta-label" }, tx(t, "priority", "Priority")),
-        h("span", {
-          className: "hermes-kanban-meta-value hermes-kanban-editable",
-          onClick: function () { setEditing(true); },
-          title: tx(t, "clickToEdit", "Click to edit"),
-        }, String(props.task.priority)),
+        h("span", { className: "hermes-kanban-meta-value" },
+          String(props.task.priority),
+          h("button", {
+            type: "button",
+            className: "hermes-kanban-edit-link hermes-kanban-priority-edit",
+            onClick: open,
+            "aria-label": tx(t, "editPriority", "Change priority"),
+            title: tx(t, "editPriorityHint", "Change priority. Higher numbers are claimed first by the dispatcher."),
+          }, tx(t, "edit", "Edit")),
+        ),
       );
     }
-    const save = function () {
-      props.onPatch({ priority: Number(v) || 0 }).then(function () { setEditing(false); });
-    };
     return h("div", { className: "hermes-kanban-meta-row" },
       h("span", { className: "hermes-kanban-meta-label" }, tx(t, "priority", "Priority")),
-      h(Input, {
-        type: "number", value: v, autoFocus: true,
-        onChange: function (e) { setV(e.target.value); },
-        onKeyDown: function (e) {
-          if (e.key === "Enter") { e.preventDefault(); save(); }
-          if (e.key === "Escape") setEditing(false);
-        },
-        className: "h-7 text-xs w-20",
-      }),
+      h("div", { className: "hermes-kanban-edit-row" },
+        h(Input, {
+          type: "number", value: v, autoFocus: true, step: 1,
+          onChange: function (e) { setV(e.target.value); if (invalid) setInvalid(false); },
+          onKeyDown: keyDown,
+          className: "h-7 text-xs w-20",
+          "aria-label": tx(t, "priority", "Priority"),
+          "aria-invalid": invalid ? "true" : undefined,
+        }),
+        h(Button, { onClick: save, size: "sm", variant: "outline", disabled: saving },
+          tx(t, "save", "Save")),
+        h(Button, { onClick: cancel, size: "sm", variant: "ghost", disabled: saving },
+          tx(t, "cancel", "Cancel")),
+      ),
+      invalid
+        ? h("div", { className: "hermes-kanban-priority-invalid", role: "alert" },
+            tx(t, "priorityInvalid", "Enter a whole number. 0 is the default; higher is claimed first."))
+        : null,
     );
   }
 

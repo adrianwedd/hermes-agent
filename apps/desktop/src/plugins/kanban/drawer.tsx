@@ -57,6 +57,7 @@ import {
   useKanbanScope
 } from './api'
 import { ModelOverrideField, overridePatch } from './model-override'
+import { makePriorityWriter, PriorityEditor } from './priority-editor'
 import {
   type Diagnostic,
   type DiagnosticAction,
@@ -903,6 +904,24 @@ export function TaskDrawer({
       (err: unknown) => host.notify({ kind: 'error', message: errText(err) })
     )
 
+  // Priority write for the drawer's editor: PATCH the native field, then read
+  // the stored value back before the editor closes. A rejected write rethrows,
+  // so the editor keeps the operator's draft and the toast explains why.
+  const persistPriority = makePriorityWriter({
+    fetch: () => fetchTask(id!),
+    invalidate,
+    patch: body => patchTask(id!, body)
+  })
+  const priorityWriter = async (taskId: string, priority: number) => {
+    try {
+      return await persistPriority(taskId, priority)
+    } catch (err) {
+      host.notify({ kind: 'error', message: errText(err) })
+
+      throw err
+    }
+  }
+
   const commentMut = useMutation({
     mutationFn: (body: string) => addComment(id!, body),
     onError: err => host.notify({ kind: 'error', message: errText(err) }),
@@ -1107,7 +1126,15 @@ export function TaskDrawer({
                 </MetaRow>
                 {typeof task.priority === 'number' && (
                   <MetaRow label={k.metaPriority}>
-                    <PriorityGlyph priority={task.priority} />
+                    {/* After-creation priority is native scheduling input, so
+                        the write goes through PATCH + a server readback rather
+                        than an optimistic local edit (see priority-editor.tsx
+                        for why the generic `mutate()` helper is not reused). */}
+                    <PriorityEditor
+                      onSave={priorityWriter}
+                      priority={task.priority}
+                      taskId={task.id}
+                    />
                   </MetaRow>
                 )}
                 {task.tenant && <MetaRow label={k.metaTenant}>{task.tenant}</MetaRow>}
