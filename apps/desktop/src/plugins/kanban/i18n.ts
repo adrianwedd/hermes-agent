@@ -22,6 +22,7 @@ type KanbanMessages = {
   locked: { review: string; running: string; scheduled: string }
   arcRunning: string
   arcStale: string
+  dispatch: { heading: string; held: string; enabled: string; unavailable: string; disabledReason: string; enabledReason: string; missingReason: string; owner: (name: string) => string; next: (action: string) => string }
   title: string
   orchestrationSettings: string
   newTask: string
@@ -247,6 +248,7 @@ export const en: KanbanMessages = {
   },
   arcRunning: 'An agent is working on this now.',
   arcStale: 'Claimed, but no worker heartbeat for 2+ minutes — the dispatcher will reclaim it.',
+  dispatch: { heading: 'Dispatch eligibility', held: 'Held · dispatch disabled', enabled: 'Dispatch eligibility enabled', unavailable: 'Dispatch state unavailable', disabledReason: 'dispatch_eligible=false; named reason has not been supplied by this backend', enabledReason: 'dispatch_eligible=true; other admission gates may still apply', missingReason: 'Backend did not serialize dispatch eligibility', owner: name => `Owner: ${name}`, next: action => `Next: ${action}` },
   title: 'Kanban',
   orchestrationSettings: 'Orchestration settings',
   newTask: 'New task',
@@ -475,6 +477,7 @@ const ja: KanbanMessages = {
   },
   arcRunning: 'エージェントが現在作業中です。',
   arcStale: '取得済みですが、2分以上ワーカーのハートビートがありません — ディスパッチャが再取得します。',
+  dispatch: { heading: '実行可否', held: '保留 · 実行無効', enabled: '実行資格が有効', unavailable: '実行状態を取得できません', disabledReason: 'dispatch_eligible=false; このバックエンドには保留理由の記録がありません', enabledReason: 'dispatch_eligible=true; 他の実行条件が適用される場合があります', missingReason: 'バックエンドが実行資格を返していません', owner: name => `担当: ${name}`, next: action => `次の操作: ${action}` },
   title: 'カンバン',
   orchestrationSettings: 'オーケストレーション設定',
   newTask: '新しいタスク',
@@ -702,6 +705,7 @@ const zh: KanbanMessages = {
   },
   arcRunning: '有代理正在处理它。',
   arcStale: '已领取，但超过 2 分钟没有工作单元心跳 — 调度器将重新领取。',
+  dispatch: { heading: '调度资格', held: '保留 · 调度禁用', enabled: '调度资格已启用', unavailable: '调度状态不可用', disabledReason: 'dispatch_eligible=false; 此后端未提供明确的保留原因', enabledReason: 'dispatch_eligible=true; 其他准入条件仍可能适用', missingReason: '后端未返回调度资格', owner: name => `负责人: ${name}`, next: action => `下一步: ${action}` },
   title: '看板',
   orchestrationSettings: '编排设置',
   newTask: '新建任务',
@@ -926,6 +930,7 @@ const zhHant: KanbanMessages = {
   },
   arcRunning: '有代理正在處理它。',
   arcStale: '已領取，但超過 2 分鐘沒有工作單元心跳 — 排程器將重新領取。',
+  dispatch: { heading: '排程資格', held: '保留 · 排程停用', enabled: '排程資格已啟用', unavailable: '排程狀態無法取得', disabledReason: 'dispatch_eligible=false; 此後端未提供明確的保留原因', enabledReason: 'dispatch_eligible=true; 其他准入條件仍可能適用', missingReason: '後端未傳回排程資格', owner: name => `負責人: ${name}`, next: action => `下一步: ${action}` },
   title: '看板',
   orchestrationSettings: '編排設定',
   newTask: '新增任務',

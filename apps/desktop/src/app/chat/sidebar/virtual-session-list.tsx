@@ -1,9 +1,12 @@
+import { KanbanSessionReader } from './kanban-session-reader'
+import { normalizeSessionSource } from '@/lib/session-source'
+import { sessionTitle } from '@/lib/chat-runtime'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useStore } from '@nanostores/react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type * as React from 'react'
-import { type FC, useEffect, useRef } from 'react'
+import { type FC, useEffect, useRef, useState } from 'react'
 
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -83,6 +86,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
   sortable
 }) => {
   const { t } = useI18n()
+  const [workerSession, setWorkerSession] = useState<SessionInfo | null>(null)
   const dividerLabels = t.sidebar.dateDivider
   const scrollerRef = useRef<HTMLDivElement | null>(null)
   const density = useStore($sessionListDensity)
@@ -156,7 +160,9 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
       )
     }
 
-    const { branchStem, session } = row.entry
+    const { branchStem, session: originalSession } = row.entry
+    const isWorker = normalizeSessionSource(originalSession.source) === 'kanban'
+    const session = isWorker ? { ...originalSession, title: `Kanban · ${sessionTitle(originalSession)}` } : originalSession
     const reorderable = sortable && !branchStem
 
     const commonProps: SessionRowCommonProps = {
@@ -169,7 +175,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
       onDelete: () => onDeleteSession(session.id),
       onPin: () => onTogglePin(sessionPinId(session)),
       onToggleUnread: () => onToggleUnread(session.id),
-      onResume: () => onResumeSession(session.id, session),
+      onResume: () => isWorker ? setWorkerSession(originalSession) : onResumeSession(session.id, session),
       reorderable,
       showProfile: showProfileTags,
       unread: session.unread === true
@@ -194,6 +200,8 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
   // DndContext + SortableContext (keyed on the same ids); the virtualized rows
   // just consume that context via useSortable.
   return (
+    <>
+    {workerSession && <KanbanSessionReader session={workerSession} onClose={() => setWorkerSession(null)} />}
     <div
       // scrollbar-fade, NOT scrollbar-overlay: overlay opts out of the themed
       // thin scrollbar entirely, and on Windows (no native overlay scrollbars)
@@ -217,6 +225,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
         {rows}
       </div>
     </div>
+    </>
   )
 }
 

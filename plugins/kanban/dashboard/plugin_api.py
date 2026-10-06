@@ -315,11 +315,20 @@ def get_board(
         summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
         # One query for the active run's start per card (avoids N+1); the run
         # clock ticks from this, not the task's first-ever start.
+        from hermes_cli.kanban_native_estimates import read_saved
         run_start_map = kanban_db.current_run_started_ats(conn, [t.id for t in tasks])
+        from hermes_cli.kanban_card_facts import card_facts, native_config_for, token_facts, native_read_session
+        from hermes_cli.kanban_run_routes import run_routes
+        from hermes_cli.moa_config import resolve_moa_preset
+        facts = card_facts(conn, [asdict(t) for t in tasks], native_config_for, resolve_moa_preset)
         for t in tasks:
             full = summary_map.get(t.id)
             d = _task_dict(t, latest_summary=(full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None),
                            current_run_started_at=run_start_map.get(t.id))
+            d["task_estimate"] = read_saved(conn, t.id, t.title, t.body)
+            d["card_facts"] = facts.get(t.id)
+            d["card_facts"]["tokens"] = token_facts(conn, asdict(t), native_read_session)
+            d["card_facts"]["run_routes"] = run_routes(conn, asdict(t), native_read_session)
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
@@ -380,6 +389,14 @@ def get_task(
         task_d = _task_dict(
             task, latest_summary=kanban_db.latest_summary(conn, task_id),
             current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id))
+        from hermes_cli.kanban_card_facts import card_facts, native_config_for, token_facts, native_read_session
+        from hermes_cli.kanban_run_routes import run_routes
+        from hermes_cli.moa_config import resolve_moa_preset
+        from hermes_cli.kanban_native_estimates import read_saved
+        task_d['task_estimate'] = read_saved(conn, task_id, task.title, task.body)
+        task_d['card_facts'] = card_facts(conn, [asdict(task)], native_config_for, resolve_moa_preset)[task_id]
+        task_d['card_facts']['tokens'] = token_facts(conn, asdict(task), native_read_session)
+        task_d['card_facts']['run_routes'] = run_routes(conn, asdict(task), native_read_session)
         links = _links_for(conn, task_id)
         child_summaries = kanban_db.latest_summaries(conn, links["children"])
         children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))
@@ -519,6 +536,7 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 # --- PATCH /tasks/:id  and  POST /tasks/bulk ---------------------------------
 
 class UpdateTaskBody(BaseModel):
+    dispatch_eligible: Optional[bool] = Field(None, strict=True)
     status: Optional[str] = None
     assignee: Optional[str] = None
     priority: Optional[int] = None
@@ -540,6 +558,7 @@ class UpdateTaskBody(BaseModel):
 
 
 class BulkTaskBody(BaseModel):
+    dispatch_eligible: Optional[bool] = None
     ids: list[str]
     status: Optional[str] = None
     assignee: Optional[str] = None  # "" or None = unassign
@@ -681,12 +700,22 @@ def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Option
 def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None)):
     with _board_conn(board) as (board, conn):
         _require_task(conn, task_id)
+        if payload.dispatch_eligible is not None:
+            # A single guarded edit prevents partially applying eligibility+status/owner changes.
+            if any(value is not None for key, value in payload.model_dump().items()
+                   if key != "dispatch_eligible" and not key.startswith("clear_")) or any(
+                       payload.model_dump()[key] for key in ("clear_model_override", "clear_reasoning_effort")):
+                raise HTTPException(status_code=400, detail="dispatch eligibility changes must be sent alone")
+            with _map_errors(409, RuntimeError), _map_errors(400, ValueError):
+                _require_ok(kanban_db.edit_task(conn, task_id, dispatch_eligible=payload.dispatch_eligible, board=board))
         # For a combined assignee+review patch, request_review must capture the
         # current implementer before the task is routed to the reviewer.
         review_assignee_deferred = payload.status == "review" and payload.assignee is not None
         if payload.assignee is not None and not review_assignee_deferred:
             with _map_errors(409, RuntimeError):
                 _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
+        if payload.dispatch_eligible is not None:
+            _require_ok(kanban_db.edit_task(conn, task_id, dispatch_eligible=payload.dispatch_eligible))
         if payload.status is not None:
             _patch_status(conn, task_id, payload, review_assignee_deferred)
         for wanted, apply, _refused in _OVERRIDE_OPS:
@@ -702,6 +731,24 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         return {"task": _task_dict(
             updated, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)
         ) if updated else None}
+
+
+class ProjectBindingBody(BaseModel):
+    project_id: str
+    expected_status: str
+    expected_assignee: Optional[str]
+    expected_workspace_path: Optional[str]
+    expected_project_id: Optional[str]
+
+
+@router.post("/tasks/{task_id}/project")
+def bind_existing_task_project(task_id: str, payload: ProjectBindingBody, board: Optional[str] = Query(None)):
+    from hermes_cli.kanban_project_binding import bind_project
+    with _board_conn(board) as (board, conn):
+        _require_task(conn, task_id)
+        with _map_errors(409, RuntimeError), _map_errors(400, ValueError):
+            _require_ok(bind_project(conn, task_id, board=board, **payload.model_dump()))
+        return {"task": _task_dict(_require_task(conn, task_id))}
 
 
 @router.delete("/tasks/{task_id}")
@@ -832,6 +879,9 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
                 entry.update(ok=False, error="assign refused")
         except RuntimeError as e:
             entry.update(ok=False, error=str(e))
+    if payload.dispatch_eligible is not None:
+        if not kanban_db.edit_task(conn, tid, dispatch_eligible=payload.dispatch_eligible):
+            entry.update(ok=False, error="eligibility edit refused")
     if payload.priority is not None:
         _set_priority(conn, tid, payload.priority, board)
     for wanted, apply, refused in _OVERRIDE_OPS:
@@ -1065,9 +1115,19 @@ def estimate_text_endpoint(payload: EstimateBody):
 @router.post("/tasks/{task_id}/estimate")
 def estimate_task_endpoint(task_id: str, board: Optional[str] = Query(None)):
     """Estimate for an existing task; ``{ok, est_tokens, complexity, rationale, model}``."""
+    from hermes_cli.kanban_native_estimates import scope_hash, persist
     with _board_conn(board) as (board, conn):
         task = _require_task(conn, task_id)
-    return _run_estimate(task.title, task.body, task_id=task_id)
+        expected = scope_hash(task.title, task.body)
+    response = _run_estimate(task.title, task.body, task_id=task_id)
+    if not response.get('ok'):
+        return response  # Preserve the last durable result on timeout/failure.
+    try:
+        with _board_conn(board) as (board, conn):
+            return persist(conn, task_id, response, expected_scope=expected, board=board)
+    except Exception:
+        log.exception('Kanban native estimate persistence failed')
+        return {'ok': False, 'reason': 'estimate could not be saved; previous estimate retained'}
 
 
 def _cap(s: Optional[str], n: int) -> str:
@@ -1114,10 +1174,9 @@ def _run_estimate(title: str, body: Optional[str], *, task_id: Optional[str]) ->
         parsed = None
     if not parsed:
         return {"ok": False, "reason": "could not parse an estimate from the model"}
-    try:
-        est_tokens = int(parsed.get("est_tokens") or 0)
-    except (TypeError, ValueError):
-        est_tokens = 0
+    est_tokens = parsed.get("est_tokens")
+    if type(est_tokens) is not int or not 0 < est_tokens <= 1_000_000_000:
+        return {"ok": False, "reason": "model returned an invalid token estimate"}
     complexity = str(parsed.get("complexity") or "").strip().upper()
     return {
         "ok": True, "est_tokens": est_tokens, "complexity": complexity if complexity in {"S", "M", "L"} else None,
@@ -1805,3 +1864,14 @@ async def stream_events(ws: WebSocket):
             pass
     finally:
         await tail.shutdown()
+
+
+@router.get("/worker-session-link")
+def worker_session_link(session_id: str = Query(...)):
+    from hermes_cli.kanban_worker_session_links import find_link
+    links = []
+    for info in kanban_db.list_boards(include_archived=False):
+        board = info.get('slug') or 'default'
+        with _board_conn(board) as (_, conn):
+            links.extend(find_link(conn, session_id, board))
+    return {'link': links[0] if len(links) == 1 else None, 'ambiguous': len(links) > 1}

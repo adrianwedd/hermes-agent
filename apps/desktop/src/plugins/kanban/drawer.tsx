@@ -1,3 +1,6 @@
+import { DispatchFacts } from './dispatch-facts'
+import { DeliveryDetails } from './delivery-receipt'
+import { observedRouteLabel } from './card-facts'
 /**
  * Task modal — the desktop port of the dashboard's task detail, Linear-style:
  * a centered two-column dialog (main: diagnostics, description, result,
@@ -62,6 +65,7 @@ import {
   type DiagnosticAction,
   type KanbanAttachment,
   type KanbanEvent,
+  type KanbanTask,
   type KanbanTaskDetail,
   SEVERITY_TONE,
   type TaskEstimate,
@@ -577,14 +581,42 @@ function AttachmentsSection({
   )
 }
 
+function RunRoutesSection({ task }: { task: KanbanTask }) {
+  const routes = task.card_facts?.run_routes
+  return <Section label="Agent and recorded model routes">
+    {!routes ? <p className="text-xs text-(--ui-text-tertiary)">Awaiting backend update; run route receipts unavailable.</p> : routes.history.length === 0 ? <p className="text-xs">Planned agent: {routes.planned_agent} · no run yet</p> : routes.history.map(run => <div className="mb-3 min-w-0 text-xs [overflow-wrap:anywhere]" key={run.run_id}>
+      <p>Run {run.run_id} · agent {run.agent}</p>
+      <p>Last observed: {observedRouteLabel(run.last_observed)}{run.last_observed?.observed_at ? ` · ${new Date(run.last_observed.observed_at * 1000).toLocaleString()}` : ''}</p>
+      <p>Launch: {observedRouteLabel(run.launch)}</p>
+      <p className="text-(--ui-text-tertiary)">{run.basis}</p>
+    </div>)}
+  </Section>
+}
+
+function RecordedTokensSection({ task }: { task: KanbanTask }) {
+  const tokens = task.card_facts?.tokens
+  const usage = task.status === 'running' ? tokens?.current : tokens?.cumulative
+  const value = (n: number | null | undefined) => n == null ? 'not reported' : n.toLocaleString()
+  return <Section label="Recorded token usage">
+    <div className="flex min-w-0 flex-col gap-1 text-[0.6875rem] leading-relaxed text-(--ui-text-tertiary)">
+      <p>{task.status === 'running' ? 'Current run' : 'Card cumulative recorded runs'} · partial coverage</p>
+      <p>Total: {value(usage?.total)} · input including cache: {value(usage?.input)} · output: {value(usage?.output)}</p>
+      <p>Uncached input: {value(usage?.uncached_input)} · cached read: {value(usage?.cache_read)} · cache write: {value(usage?.cache_write)}</p>
+      <p>Cache hits: not reported · cache misses: not reported</p>
+      {task.status === 'running' && <p>Card cumulative recorded runs: {value(tokens?.cumulative?.total)}</p>}
+      <p>{tokens?.coverage || 'No linked usage record available. Auxiliary and unreported calls are not guaranteed.'}</p>
+    </div>
+  </Section>
+}
+
 // Rough effort estimate via the auxiliary (auto-routed) model. Tokens +
 // complexity, never dollars — providers don't report cost reliably. Gated
 // behind an explicit click + disclaimer since it makes a model call. The
 // control keeps a stable footprint (spinner swaps in place) so there's no
 // layout jump when it runs.
-function EstimateSection({ id }: { id: string }) {
+function EstimateSection({ id, saved, backendReady }: { id: string; saved?: null | TaskEstimate; backendReady: boolean }) {
   const k = useKanban()
-  const [result, setResult] = useState<null | TaskEstimate>(null)
+  const [result, setResult] = useState<null | TaskEstimate>(saved ?? null)
 
   const est = useMutation({
     mutationFn: () => estimateTask(id),
@@ -599,10 +631,11 @@ function EstimateSection({ id }: { id: string }) {
   })
 
   // A new task resets the cached estimate (the drawer reuses one instance).
-  useEffect(() => setResult(null), [id])
+  useEffect(() => setResult(saved ?? null), [id, saved])
 
   return (
     <Section label={k.estimate}>
+      {!backendReady && <p className="text-[0.6875rem] text-(--ui-text-tertiary)">Durable estimates await the backend update.</p>}
       {result?.ok ? (
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2 text-[0.8125rem]">
@@ -618,7 +651,7 @@ function EstimateSection({ id }: { id: string }) {
               <Button
                 aria-label={k.reEstimate}
                 className="ml-auto"
-                disabled={est.isPending}
+                disabled={est.isPending || !backendReady}
                 onClick={() => est.mutate()}
                 size="icon-xs"
                 variant="ghost"
@@ -627,13 +660,15 @@ function EstimateSection({ id }: { id: string }) {
               </Button>
             </Tip>
           </div>
+          {result.stale_scope && <p className="text-[0.6875rem] text-amber-500">Task scope changed since this estimate.</p>}
+          {result.created_at && <p className="text-[0.625rem] text-(--ui-text-quaternary)">Saved {new Date(result.created_at * 1000).toLocaleString()} · native estimate</p>}
           {result.rationale && (
             <p className="text-[0.6875rem] leading-relaxed text-(--ui-text-quaternary)">{result.rationale}</p>
           )}
         </div>
       ) : (
         <div className="flex items-center gap-2">
-          <Button disabled={est.isPending} onClick={() => est.mutate()} size="xs" variant="outline">
+          <Button disabled={est.isPending || !backendReady} onClick={() => est.mutate()} size="xs" variant="outline">
             <Codicon name={est.isPending ? 'loading' : 'dashboard'} size="0.75rem" spinning={est.isPending} />
             {est.isPending ? k.estimating : k.estimateEffort}
           </Button>
@@ -1164,7 +1199,11 @@ export function TaskDrawer({
                 {task.created_by && <MetaRow label={k.metaCreatedBy}>{task.created_by}</MetaRow>}
                 {ago(task.created_at) && <MetaRow label={k.metaCreated}>{ago(task.created_at)}</MetaRow>}
                 {running && task.worker_pid ? <MetaRow label={k.metaWorkerPid}>{task.worker_pid}</MetaRow> : null}
-                <EstimateSection id={task.id} />
+                <Section label={k.dispatch.heading}><DispatchFacts task={task} /></Section>
+                <Section label="Delivery receipt"><DeliveryDetails receipt={task.card_facts?.delivery} /></Section>
+                <RunRoutesSection task={task} />
+                <RecordedTokensSection task={task} />
+                <EstimateSection backendReady={Object.prototype.hasOwnProperty.call(task, 'task_estimate')} id={task.id} saved={task.task_estimate} />
 
                 {Array.isArray(detail.attachments) && (
                   <AttachmentsSection

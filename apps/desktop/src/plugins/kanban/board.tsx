@@ -1,3 +1,6 @@
+import { hermesApi } from '@/hermes'
+import { $workerCardRequest } from './kanban-card-navigation'
+import { CardFacts } from './card-facts'
 /**
  * The Kanban board page — mounted at `/kanban` (a ROUTES_AREA contribution) in
  * the workspace pane or a split route tile. The desktop port of the dashboard
@@ -167,7 +170,7 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
   const meta = columnMeta(task.status)
 
   return (
-    <div className="flex items-center gap-2 whitespace-nowrap text-[0.625rem] text-(--ui-text-tertiary)">
+    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[0.625rem] text-(--ui-text-tertiary)">
       {arc === 'queued' && attached ? (
         // WHO is coming for the card. The arc only animates once the agent is
         // actually working; while queued, the named chip carries "attached".
@@ -223,7 +226,7 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
           </span>
         </Tip>
       )}
-      <div className="ml-auto flex min-w-0 shrink items-center gap-2">
+      <div className="flex min-w-0 basis-full flex-wrap items-center gap-x-2 gap-y-1">
         {typeof task.priority === 'number' && task.priority > 0 && <PriorityGlyph priority={task.priority} />}
         {task.progress && task.progress.total > 0 && (
           <Meta icon="checklist">
@@ -276,7 +279,7 @@ function Card({
       <ContextMenuTrigger asChild>
         <div
           className={cn(
-            'group relative flex cursor-grab flex-col gap-2 rounded-md border border-(--ui-stroke-tertiary) border-l-2 bg-(--ui-bg-elevated) p-2.5',
+            'group relative flex min-w-0 cursor-grab flex-col gap-2 rounded-md border border-(--ui-stroke-tertiary) border-l-2 bg-(--ui-bg-elevated) p-2.5',
             // Hover matches the provider-picker rows: a quiet primary fill;
             // selected = the theme's focus color (same as a focused input).
             'transition-colors hover:bg-primary/[0.06] active:cursor-grabbing',
@@ -304,12 +307,13 @@ function Card({
           {(arc === 'running' || arc === 'stale') && !dragging && !selected && (
             <span aria-hidden className={cn('kanban-arc', arc === 'stale' && 'kanban-arc--stale')} />
           )}
-          <span className="line-clamp-2 text-[0.8125rem] font-medium leading-snug text-foreground">
+          <span title={task.title} className="line-clamp-2 break-words text-[0.8125rem] font-medium leading-snug text-foreground">
             {task.title || task.id}
           </span>
           {summary && (
             <span className="line-clamp-2 text-[0.6875rem] leading-snug text-(--ui-text-tertiary)">{summary}</span>
           )}
+          <CardFacts task={task} />
           <CardFooter arc={arc} task={task} />
         </div>
       </ContextMenuTrigger>
@@ -1097,6 +1101,7 @@ export function KanbanBoardPage() {
   const scope = useKanbanScope()
   const slug = useValue($boardSlug)
   const [archived, setArchived] = useState(false)
+  const [backendReloading, setBackendReloading] = useState(false)
 
   // Live updates ride the events socket (bindApi); this interval is only the
   // slow heartbeat for socketless paths (OAuth remotes, dropped connections).
@@ -1107,6 +1112,13 @@ export function KanbanBoardPage() {
   })
 
   const [openId, setOpenId] = useState<null | string>(null)
+  const workerCard = useValue($workerCardRequest)
+  useEffect(() => {
+    if (!workerCard) return
+    $boardSlug.set(workerCard.board)
+    setOpenId(workerCard.card_id)
+    $workerCardRequest.set(null)
+  }, [workerCard])
   const [addStatus, setAddStatus] = useState<null | string>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -1375,6 +1387,28 @@ export function KanbanBoardPage() {
           </Button>
         </div>
       </header>
+
+      {board?.columns.some(col => col.tasks.some(task => !task.card_facts)) && <div className="mx-4 mb-2 flex min-w-0 flex-wrap items-center gap-3 rounded border border-(--ui-stroke-tertiary) px-3 py-2 text-xs text-(--ui-text-tertiary)">
+        <span>Backend update pending. Loading it restarts the Studio local model host.</span>
+        <Button disabled={backendReloading || scope !== 'local' || board.columns.some(col => col.tasks.some(task => task.status === 'running'))} size="xs" variant="outline" onClick={async () => {
+          if (!window.hermesDesktop?.recycleBackend) return
+          setBackendReloading(true)
+          try {
+            const read = <T,>(path: string) => hermesApi<T>({ path, method: 'GET', connectionId: 'local', profile: null, passive: true })
+            const allBoards = await read<{ boards: { slug: string }[] }>('/api/plugins/kanban/boards')
+            if (!Array.isArray(allBoards.boards) || allBoards.boards.length === 0) throw new Error('Cannot verify all boards.')
+            const workers = await Promise.all(allBoards.boards.map(item => read<{ count: number }>(`/api/plugins/kanban/workers/active?board=${encodeURIComponent(item.slug)}`)))
+            if (workers.some(item => item.count !== 0)) throw new Error('Running workers remain on a board, or activity is unavailable.')
+            const idle = await read<{ idle: boolean | null }>('/api/health/idle')
+            if (idle.idle !== true) throw new Error('The primary backend cannot prove it is idle.')
+            if (!window.confirm('Load the Studio backend update in the approved idle window? This restarts the local model host.')) return
+            await window.hermesDesktop.recycleBackend(null)
+            await qc.invalidateQueries({ queryKey: boardKey(scope, slug, archived) })
+          } catch (error) { host.notify({ kind: 'error', message: String(error) }) }
+          finally { setBackendReloading(false) }
+        }}>{backendReloading ? 'Checking idle state…' : 'Load backend update'}</Button>
+        <span>Requires an approved idle window; checks every board and the primary backend before restart.</span>
+      </div>}
 
       {settingsOpen && <OrchestrationPanel />}
 

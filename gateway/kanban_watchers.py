@@ -303,10 +303,13 @@ class GatewayKanbanWatchersMixin:
                     # takes effect on the next tick, not on restart.
                     _ad_enabled, _ad_per_tick = _resolve_auto_decompose_settings(_load_config)
                     # See #49638.
-                    if _ad_enabled:
-                        await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
                     results = await _to_thread_process_service(dispatcher.tick_once)
                     any_spawned = _log_spawn_results(results)
+                    # Qualified implementation/review work must not wait behind
+                    # an off-turn intake model request or its recovery timeout.
+                    if _ad_enabled:
+                        await _to_thread_process_service(dispatcher.prepare_todo_tick)
+                        await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
                     ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
                     bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
                 now = int(time.time())

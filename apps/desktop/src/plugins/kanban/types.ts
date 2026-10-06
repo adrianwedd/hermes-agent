@@ -1,9 +1,57 @@
+export interface RecordedTokenUsage {
+  uncached_input?: null | number
+  cache_read?: null | number
+  cache_write?: null | number
+  total: number
+  input: number
+  output: null | number
+  counters_complete?: boolean
+  partial: boolean
+  scope: string
+  recorded_runs?: number
+  missing_runs?: number
+}
+
+export interface RecordedRoute {
+  provider: string; model: string; observed_at?: number | null
+  aggregator?: { provider: string; model: string } | null
+  advisers?: { provider: string; model: string }[]
+}
+export interface RunRouteReceipt {
+  run_id: number; agent: string; started_at: number; ended_at?: number | null
+  launch: RecordedRoute | null; last_observed: RecordedRoute | null; basis: string
+}
+
+export interface DeliveryReceipt {
+  repository: string; commit_sha: string | null; branch: string | null
+  remote_branch_head: string | null; push_status: 'verified' | 'reported_unverified' | 'unknown'
+  remote_branch_checked_at?: string | null
+  pr_url: string | null; pr_head_sha: string | null; pr_verified: boolean
+  pr_state: string | null; pr_draft: boolean | null; issue_url: string | null
+  acceptance: string | null; acceptance_basis: string; checked_at: string | null
+  source: { attachment_id: number; filename: string; sha256: string; basis: string }
+}
+export interface KanbanCardFacts {
+  dispatch?: { eligible?: boolean; label: string; reason: string; owner?: string | null; next_action?: string | null; basis: string }
+  delivery?: DeliveryReceipt | null
+  run_routes?: { selected: RunRouteReceipt | null; history: RunRouteReceipt[]; planned_agent: string; historical_inference: false }
+  tokens?: { current: null | RecordedTokenUsage; cumulative: null | RecordedTokenUsage; coverage: string }
+  blocker: null | { label: string; detail: string }
+  progress: null | { text: string; at?: null | number; basis: string }
+  heartbeat_at?: null | number
+  model: { primary: string; advisers: string[]; basis: string }
+}
+
 /** The slice of the kanban REST contract the board renders. The backend
  *  (`plugins/kanban/dashboard/plugin_api.py`) returns much more per task; we
  *  type only what the UI reads so a schema addition never breaks the build. */
 
 /** One card. `status` is the column id (see COLUMN_META). */
 export interface KanbanTask {
+  dispatch_eligible?: boolean
+  task_estimate?: null | TaskEstimate
+  card_facts?: KanbanCardFacts
+  last_failure_error?: null | string
   id: string
   title: string
   body?: null | string
@@ -195,6 +243,11 @@ export interface KanbanProject {
 
 /** POST /tasks/:id/estimate — rough auxiliary-model estimate (never dollars). */
 export interface TaskEstimate {
+  created_at?: number
+  scope_sha256?: string
+  stale_scope?: boolean
+  attachment_id?: number
+  provenance?: { source: string; trigger: string; actor: string; auxiliary_task: string }
   ok: boolean
   reason?: null | string
   est_tokens?: number

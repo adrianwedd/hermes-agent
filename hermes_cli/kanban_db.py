@@ -810,6 +810,7 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    dispatch_eligible: bool = True
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -825,6 +826,7 @@ class Task:
             consecutive_failures=g("consecutive_failures", g("spawn_failures", 0)),
             last_failure_error=g("last_failure_error", g("last_spawn_error")),
             skills=skills_value,
+            dispatch_eligible=bool(g("dispatch_eligible", 1)),
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
         )
@@ -2221,10 +2223,17 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     with write_txn(conn):
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
-            "FROM tasks WHERE status IN ('todo', 'blocked')"
+            "FROM tasks WHERE status IN ('todo', 'blocked') AND dispatch_eligible = 1"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
+            from hermes_cli.kanban_administrative_hold import administrative_pending
+            from hermes_cli.kanban_completion_workflow import operator_contract_pending
+            if administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
+                continue
+            from hermes_cli.kanban_readiness import preparation_reason
+            if _resume_status_from_events(conn, task_id) != 'review' and preparation_reason(conn, task_id):
+                continue
             cur_status = row["status"]
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
@@ -2297,6 +2306,17 @@ def _claim_and_open_run(
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
+    from hermes_cli.kanban_administrative_hold import administrative_pending
+    from hermes_cli.kanban_completion_workflow import operator_contract_pending
+    if administrative_pending(conn, task_id) or operator_contract_pending(conn, task_id):
+        return None
+    if source_status != 'review':
+        from hermes_cli.kanban_readiness import preparation_reason
+        reason = preparation_reason(conn, task_id)
+        if reason:
+            conn.execute("UPDATE tasks SET status='todo' WHERE id=? AND status='ready'", (task_id,))
+            _append_event(conn, task_id, 'claim_rejected', {'reason': reason})
+            return None
     cur = conn.execute(
         f"""
         UPDATE tasks
@@ -2305,6 +2325,7 @@ def _claim_and_open_run(
                claim_expires = ?,
                started_at    = COALESCE(started_at, ?)
          WHERE id = ?
+           AND dispatch_eligible = 1
            AND status = '{source_status}'
            AND claim_lock IS NULL
         """,
@@ -2338,9 +2359,12 @@ def _claim_and_open_run(
     return run_id
 
 
+from hermes_cli.kanban_provider_admission import managed_claim
+
+@managed_claim
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, _expected_route: Optional[tuple] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
@@ -2351,6 +2375,10 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        if _expected_route is not None:
+            route = conn.execute("SELECT assignee,provider_override,model_override,dispatch_eligible FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if route is None or tuple(route) != _expected_route:
+                return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
         # recompute_ready re-promotes when the parents finish.
@@ -2373,9 +2401,10 @@ def claim_task(
     return claimed
 
 
+@managed_claim
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, _expected_route: Optional[tuple] = None,
 ) -> Optional[Task]:
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
@@ -2384,6 +2413,10 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        if _expected_route is not None:
+            route = conn.execute("SELECT assignee,provider_override,model_override,dispatch_eligible FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if route is None or tuple(route) != _expected_route:
+                return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -2805,6 +2838,7 @@ def complete_task(
     summary: Optional[str] = None, metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
     fire_lifecycle_hook: bool = True, force: bool = False,
+    _prepared_evidence: Optional[dict] = None,
 ) -> bool:
     """``running|ready|blocked|review -> done``; records ``result``.
 
@@ -2834,6 +2868,10 @@ def complete_task(
         conn, task_id, metadata, summary=summary, result=result,
     )
     handoff_summary = summary if summary is not None else result
+    from hermes_cli.kanban_completion_evidence import prepare_gate, record_gate
+    evidence_gate = _prepared_evidence if _prepared_evidence is not None else prepare_gate(conn, task_id, metadata, expected_run_id=expected_run_id, force=force)
+    if evidence_gate is False:
+        return False
     acceptance = prepare_acceptance(conn, task_id, expected_run_id, metadata)
     if acceptance is False:
         return False
@@ -2841,6 +2879,8 @@ def complete_task(
         # Hard invariant even for human review approval: a parent may have
         # reopened while this task waited.
         if not _parents_satisfied(conn, task_id):
+            return False
+        if not record_gate(conn, task_id, evidence_gate):
             return False
         if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
             return False
@@ -3213,6 +3253,7 @@ def edit_task(
     body: Optional[str] = None, priority: Optional[int] = None,
     result: Optional[str] = None, summary: Optional[str] = None,
     metadata: Optional[dict] = None, board: Optional[str] = None,
+    dispatch_eligible: Optional[bool] = None,
 ) -> bool:
     """Edit task fields, optionally backfilling a completed task's result."""
     changed_fields = [
@@ -3225,6 +3266,15 @@ def edit_task(
             return False
         assignments = []
         params = []
+        if dispatch_eligible is not None:
+            from hermes_cli.kanban_administrative_hold import administrative_pending
+            if dispatch_eligible is True and administrative_pending(conn, task_id):
+                raise ValueError("Administrative receipt hold is final for worker dispatch; create a new task for new work")
+            if type(dispatch_eligible) is not bool:
+                raise ValueError("dispatch_eligible must be boolean")
+            assignments.append("dispatch_eligible = ?")
+            params.append(int(dispatch_eligible))
+            changed_fields.append("dispatch_eligible")
         for field, value in (("title", title), ("body", body), ("priority", priority)):
             if value is not None:
                 assignments.append(f"{field} = ?")
@@ -3343,8 +3393,9 @@ def block_task(
         if kind == "dependency" and _parents_satisfied(conn, task_id):
             kind = "needs_input"
             rekind_reason = "no_open_parent"
-        new_status, event_kind, set_sql, params, payload = _route_block(
-            kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
+        from hermes_cli.kanban_completion_workflow import route_completion_block
+        new_status, event_kind, set_sql, params, payload = route_completion_block(
+            conn, task_id, kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
         )
         if rekind_reason:
@@ -3504,6 +3555,11 @@ def request_review(
                 implementer = arow["profile"] if arow else None
             if implementer is None and trow["assignee"] != reviewer:
                 implementer = trow["assignee"]
+            review_to_operator = (
+                trow["current_run_id"] is not None
+                and reviewer == trow["assignee"]
+                and _retry_status_for_run(conn, task_id, trow["current_run_id"]) == "review"
+            )
             assignee_sql = ", assignee = ?" if reviewer is not None else ""
             run_guard = "" if expected_run_id is None else " AND current_run_id = ?"
             params: tuple[Any, ...] = (
@@ -3545,6 +3601,12 @@ def request_review(
             if staged:
                 payload["artifacts"] = staged
             _append_event(conn, task_id, "review_requested", payload, run_id=run_id)
+            if review_to_operator:
+                conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=?", (task_id,))
+                _append_event(conn, task_id, "operator_review_handoff", {
+                    "automatic_retry": False, "dispatch_eligible": False,
+                    "source_run_id": run_id, "reason": "review_worker_returned_to_operator",
+                }, run_id=run_id)
     except Exception:
         if staged_copies:
             _discard_staged_copies(staged_copies, staged_copies[0].parent)
@@ -3908,6 +3970,9 @@ def specify_triage_task(
         raise ValueError("title cannot be blank")
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
+        from hermes_cli.kanban_completion_workflow import operator_contract_pending
+        if operator_contract_pending(conn, task_id):
+            return False
         existing = conn.execute(
             "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
@@ -4072,6 +4137,8 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    from hermes_cli.kanban_completion_workflow import append_completion_context
+    append_completion_context(lines, conn, task_id)
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)
@@ -4314,39 +4381,7 @@ def _counts_by_assignee(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
     return counts
 
 
-def _to_epoch(val) -> Optional[int]:
-    """Epoch seconds from int/float/numeric string/ISO-8601; None for empty/invalid."""
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return int(val)
-    s = str(val).strip()
-    if not s:
-        return None
-    try:
-        return int(s)
-    except ValueError:
-        pass
-    # ISO-8601 fallback (e.g. '2026-05-10T15:00:00Z')
-    try:
-        from datetime import datetime
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return int(dt.timestamp())
-    except (ValueError, OSError):
-        return None
-
-
-def task_age(task: Task) -> dict:
-    """Return age metrics for a single task. All values are seconds or None."""
-    now = int(time.time())
-    _c = _to_epoch(task.created_at)
-    _s = _to_epoch(task.started_at)
-    _co = _to_epoch(task.completed_at)
-    return {
-        "created_age_seconds": now - _c if _c is not None else None,
-        "started_age_seconds": now - _s if _s is not None else None,
-        "time_to_complete_seconds": _co - (_s or _c) if _co is not None else None,
-    }
+from hermes_cli.kanban_task_age import task_age
 
 
 # --- Retention + garbage collection ---
@@ -4376,7 +4411,7 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
+            "DELETE FROM task_events WHERE created_at < ? AND kind NOT IN ('decomposed','administrative_pending') AND task_id IN "
             "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)
@@ -4506,40 +4541,7 @@ def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
     return Run.from_row(row) if row else None
 
 
-def latest_summary(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
-    """Newest non-empty run summary, or None. Workers hand off via ``summary`` and
-    leave ``tasks.result`` NULL, so views need this or a done task looks empty."""
-    row = conn.execute(
-        "SELECT summary FROM task_runs "
-        "WHERE task_id = ? AND summary IS NOT NULL AND summary != '' "
-        "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1", (task_id,),
-    ).fetchone()
-    return row["summary"] if row else None
-
-
-def latest_summaries(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, str]:
-    """``{task_id: newest non-empty run summary}`` in one query (window function,
-    SQLite >= 3.25); tasks without a summary are omitted."""
-    ids = list(task_ids)
-    if not ids:
-        return {}
-    placeholders = ",".join("?" for _ in ids)
-    rows = conn.execute(
-        f"""
-        SELECT task_id, summary FROM (
-            SELECT task_id, summary,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY task_id
-                       ORDER BY COALESCE(ended_at, started_at) DESC, id DESC
-                   ) AS rn
-              FROM task_runs
-             WHERE task_id IN ({placeholders})
-               AND summary IS NOT NULL AND summary != ''
-        ) WHERE rn = 1
-        """,
-        ids,
-    ).fetchall()
-    return {r["task_id"]: r["summary"] for r in rows}
+from hermes_cli.kanban_db_summaries import latest_summary, latest_summaries
 
 
 def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, int]:

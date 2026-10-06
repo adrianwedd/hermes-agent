@@ -244,6 +244,25 @@ class _KanbanDispatcher:
                             conn.close()
         return False
 
+    def prepare_todo_tick(self) -> int:
+        """Consume at most one existing operator TODO grant across all boards."""
+        from hermes_cli.kanban_preparation import prepare_tick
+        from hermes_cli import kanban_db as kb
+        with _default_profile_secret_scope(), kb.pin_first_board_resolution():
+            boards = list(self._board_slugs())
+            start = getattr(self, '_preparation_board_cursor', 0) % max(1, len(boards))
+            for offset in range(len(boards)):
+                index = (start + offset) % len(boards)
+                slug = boards[index]
+                self._preparation_board_cursor = index + 1
+                with _kbc().connect_closing(board=slug) as conn:
+                    result = prepare_tick(conn)
+                if result["prepared"]:
+                    logger.info("kanban preparation [%s]: qualified existing TODO %s", slug,
+                                next(r["task_id"] for r in result["results"] if r["prepared"]))
+                    return 1
+        return 0
+
     def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 

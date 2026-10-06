@@ -31,6 +31,7 @@ from hermes_cli.kanban_boards import _dispatch_boards
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
 )
+from hermes_cli.kanban_completion_command import declare_requirements as _cmd_requirements
 from hermes_cli.kanban_parser import build_parser  # noqa: F401  (re-exported: hermes_cli.main, run_slash)
 
 
@@ -206,7 +207,7 @@ def _profile_author() -> str:
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
-    "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
+    "completion-requirements", "administrative-pending", "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
@@ -909,6 +910,18 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
+            from hermes_cli.kanban_completion_workflow import require_declared_contract
+            from hermes_cli.kanban_completion_evidence import CompletionEvidenceError
+            try:
+                require_declared_contract(conn, tid)
+                from hermes_cli.kanban_completion_evidence import prepare_gate
+                evidence_gate = prepare_gate(conn, tid, metadata, expected_run_id=_worker_run_id_for(tid), force=bool(getattr(args, "force", False)))
+                if evidence_gate is False:
+                    fail_msg[tid] = "completion evidence snapshot changed; retry handoff"
+                    return False
+            except CompletionEvidenceError as exc:
+                fail_msg[tid] = str(exc)
+                return False
             gate_err = _goal_gate_error(
                 conn, tid, (summary or args.result or "").strip(), "completion",
                 "Re-scope with kanban edit, or record the block with kanban block instead of completing.",
@@ -920,7 +933,10 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         expected_run_id=_worker_run_id_for(tid),
-                                        force=bool(getattr(args, "force", False)))
+                                        force=bool(getattr(args, "force", False)), _prepared_evidence=evidence_gate)
+            except CompletionEvidenceError as exc:
+                fail_msg[tid] = str(exc)
+                return False
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
@@ -1316,6 +1332,8 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
                              ("task_id", "ok", "reason", "fanout", "child_ids", "new_title"), _decompose_ok_line)
 
 
+from hermes_cli.kanban_administrative_hold import command as _cmd_administrative_pending
+
 _HANDLERS = {
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
@@ -1335,6 +1353,8 @@ _HANDLERS = {
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
     "context": _cmd_context, "specify": _cmd_specify, "decompose": _cmd_decompose,
+    "completion-requirements": _cmd_requirements,
+    "administrative-pending": _cmd_administrative_pending,
     "gc": _cmd_gc,
 }
 
