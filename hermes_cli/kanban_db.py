@@ -3545,6 +3545,11 @@ def request_review(
                 implementer = arow["profile"] if arow else None
             if implementer is None and trow["assignee"] != reviewer:
                 implementer = trow["assignee"]
+            review_to_operator = (
+                trow["current_run_id"] is not None
+                and reviewer == trow["assignee"]
+                and _retry_status_for_run(conn, task_id, trow["current_run_id"]) == "review"
+            )
             assignee_sql = ", assignee = ?" if reviewer is not None else ""
             run_guard = "" if expected_run_id is None else " AND current_run_id = ?"
             params: tuple[Any, ...] = (
@@ -3586,6 +3591,12 @@ def request_review(
             if staged:
                 payload["artifacts"] = staged
             _append_event(conn, task_id, "review_requested", payload, run_id=run_id)
+            if review_to_operator:
+                conn.execute("UPDATE tasks SET dispatch_eligible=0 WHERE id=?", (task_id,))
+                _append_event(conn, task_id, "operator_review_handoff", {
+                    "automatic_retry": False, "dispatch_eligible": False,
+                    "source_run_id": run_id, "reason": "review_worker_returned_to_operator",
+                }, run_id=run_id)
     except Exception:
         if staged_copies:
             _discard_staged_copies(staged_copies, staged_copies[0].parent)
