@@ -33,13 +33,13 @@ def harden_import_path(src_root: str | None = None) -> None:
     root_real = os.path.normcase(os.path.realpath(root))
     unsafe_roots = []
     try:
-        unsafe_roots.append(os.getcwd())
+        unsafe_roots.append((os.getcwd(), False))
     except FileNotFoundError:
         pass  # The existing deleted-cwd recovery below still owns relocation.
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
     if workspace:
-        unsafe_roots.append(workspace)
-    unsafe_roots = [os.path.normcase(os.path.realpath(p)) for p in unsafe_roots]
+        unsafe_roots.append((workspace, True))
+    unsafe_roots = [(os.path.normcase(os.path.realpath(p)), descendants) for p, descendants in unsafe_roots]
 
     def trusted_entry(entry: str) -> bool:
         if not entry or not os.path.isabs(entry):
@@ -47,11 +47,11 @@ def harden_import_path(src_root: str | None = None) -> None:
         resolved = os.path.normcase(os.path.realpath(entry))
         if resolved == root_real:
             return False  # Reinsert the source root exactly once at the front.
-        for unsafe in unsafe_roots:
+        for unsafe, descendants in unsafe_roots:
             if unsafe == root_real:
                 continue
             try:
-                if os.path.commonpath((resolved, unsafe)) == unsafe:
+                if resolved == unsafe or (descendants and os.path.commonpath((resolved, unsafe)) == unsafe):
                     return False
             except ValueError:
                 continue  # Different Windows drives cannot be workspace children.
