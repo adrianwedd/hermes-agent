@@ -2056,6 +2056,22 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
         return spawn_fn(task, workspace)
 
 
+def _canonical_claim_rejection(
+    conn: sqlite3.Connection, task_id: str, lane: str, *, dry_run: bool,
+) -> str | None:
+    """Return why the shared decision refuses this queue row, if anything."""
+    task = _kb.get_task(conn, task_id)
+    from hermes_cli.kanban_completion_workflow import ensure_scope_contract
+    if task is not None and not dry_run:
+        ensure_scope_contract(conn, task_id, authority="control_plane_pre_dispatch")
+        task = _kb.get_task(conn, task_id)
+    from hermes_cli.kanban_decision import claim_allowed
+    allowed, decision = claim_allowed(conn, task, lane) if task is not None else (False, None)
+    if allowed:
+        return None
+    return decision["reason"] if decision else "task disappeared"
+
+
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -2076,16 +2092,10 @@ def _dispatch_lane_task(
     skip is recorded on ``result``.
     """
     task_id = row["id"]
-    task = _kb.get_task(conn, task_id)
-    from hermes_cli.kanban_completion_workflow import ensure_scope_contract
-    if task is not None and not dry_run:
-        ensure_scope_contract(conn, task_id, authority='control_plane_pre_dispatch')
     # The dashboard, queue scan and final claim all consume this exact decision.
     # Capacity/admission is evaluated later and never rewrites semantic stage.
-    from hermes_cli.kanban_decision import claim_allowed
-    allowed, decision = claim_allowed(conn, task, lane) if task is not None else (False, None)
-    if not allowed:
-        reason = decision["reason"] if decision else "task disappeared"
+    reason = _canonical_claim_rejection(conn, task_id, lane, dry_run=dry_run)
+    if reason is not None:
         result.respawn_guarded.append((task_id, reason))
         return False
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
@@ -2509,63 +2519,19 @@ def worker_log_rotation_config(kanban_cfg: Optional[dict] = None) -> tuple[int, 
     return max_bytes, backup_count
 
 
-def _rotated_log_path(log_path: Path, generation: int) -> Path:
-    return log_path.with_suffix(log_path.suffix + f".{generation}")
-
-
-def _rotate_worker_log(
-    log_path: Path,
-    max_bytes: int,
-    backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
-) -> None:
-    """Rotate ``<log>`` when it exceeds ``max_bytes``: ``<log>`` → ``<log>.1``,
-    older generations shift up to ``backup_count``.
-    """
-    try:
-        if not log_path.exists() or log_path.stat().st_size <= max_bytes:
-            return
-        backup_count = _positive_int(backup_count, DEFAULT_LOG_BACKUP_COUNT, minimum=0)
-        if backup_count == 0:
-            log_path.unlink()
-            return
-        oldest = _rotated_log_path(log_path, backup_count)
-        with contextlib.suppress(OSError):
-            if oldest.exists():
-                oldest.unlink()
-        for generation in range(backup_count - 1, 0, -1):
-            src = _rotated_log_path(log_path, generation)
-            if not src.exists():
-                continue
-            with contextlib.suppress(OSError):
-                src.rename(_rotated_log_path(log_path, generation + 1))
-        log_path.rename(_rotated_log_path(log_path, 1))
-    except OSError:
-        pass
-
-
 def _module_hermes_argv() -> list[str]:
     """Interpreter-bound console-script target; there is no top-level hermes package."""
     return [sys.executable, "-m", "hermes_cli.main"]
 
 
-def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
-    """Put the running install's package root on a module-form worker's path.
-
-    ``_resolve_hermes_argv`` proves ``hermes_cli`` importable in THIS process,
-    where a store-python shim has the repo root on ``sys.path`` in-process;
-    the spawned child runs the bare ``sys.executable`` from the task workspace
-    with a scrubbed ``PYTHONPATH`` and cannot import the package the parent
-    just proved importable — it dies before any work and the board
-    auto-blocks (#122299, #122487, #122500). Same-interpreter child, so the
-    root is version-safe to propagate; ``hermes_cli.main``'s own bootstrap
-    then owns dependency activation as usual. A resolved shim path owns its
-    imports and is left alone. Same pin cron's external worker uses (#112729).
-    """
-    if cmd[1:3] != ["-m", "hermes_cli.main"]:
-        return
-    from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
-
-    pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parents[1])
+def _worker_terminal_timeout_env(
+    max_runtime_seconds: Optional[int], current_timeout: Optional[str],
+) -> Optional[str]:
+    """Compatibility facade for the worker-runtime timeout policy."""
+    from hermes_cli.kanban_worker_runtime import worker_terminal_timeout
+    return worker_terminal_timeout(
+        max_runtime_seconds, current_timeout, KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS,
+    )
 
 
 def _absolute_hermes_path(path: str) -> str:
@@ -2660,30 +2626,6 @@ def _resolve_hermes_argv() -> list[str]:
     if hermes_bin:
         return _hermes_path_argv(hermes_bin)
     return _module_hermes_argv()
-
-
-def _worker_terminal_timeout_env(
-    max_runtime_seconds: Optional[int],
-    current_timeout: Optional[str],
-) -> Optional[str]:
-    """Raise only the child's terminal default to fit its task runtime ceiling."""
-    if max_runtime_seconds is None:
-        return None
-    try:
-        runtime = int(max_runtime_seconds)
-    except (TypeError, ValueError):
-        return None
-    if runtime <= 0:
-        return None
-
-    desired = max(1, runtime - KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS)
-    try:
-        existing = int(str(current_timeout).strip()) if current_timeout else 0
-    except (TypeError, ValueError):
-        existing = 0
-    if existing >= desired:
-        return None
-    return str(desired)
 
 
 @contextlib.contextmanager
@@ -2834,7 +2776,10 @@ def _open_worker_log(task: Task, board: Optional[str]):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{task.id}.log"
     rotate_bytes, backup_count = worker_log_rotation_config()
-    _rotate_worker_log(log_path, rotate_bytes, backup_count)
+    from hermes_cli.kanban_worker_runtime import rotate_worker_log
+    rotate_worker_log(
+        log_path, rotate_bytes, backup_count, default_backups=DEFAULT_LOG_BACKUP_COUNT,
+    )
     return open(log_path, "ab")
 
 
@@ -2988,7 +2933,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     cmd = _worker_argv(task, profile_arg, env.get("HERMES_HOME"))
     # The module argv must carry the import context that made it resolvable:
     # the shim's in-process path injection is invisible to the bare child.
-    _propagate_module_import_root(cmd, env)
+    from hermes_cli.kanban_worker_runtime import propagate_module_import_root
+    propagate_module_import_root(cmd, env, Path(__file__))
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.

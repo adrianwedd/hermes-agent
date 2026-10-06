@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping
+
+logger = logging.getLogger(__name__)
 
 
 TERMINAL_STATUSES = {"done", "archived"}
@@ -47,6 +50,7 @@ def environment_fingerprint() -> dict[str, Any]:
             "environment": str(environment) if environment else None,
         }
     except Exception as exc:
+        logger.exception("could not fingerprint the committed execution environment")
         return {
             "identity": hashlib.sha256(str(exc).encode()).hexdigest(),
             "healthy": False,
@@ -185,6 +189,7 @@ def _execution_health(conn, task_id: str) -> dict[str, Any]:
             "ORDER BY id DESC LIMIT 1", (task_id,),
         ).fetchone()
     except Exception:
+        logger.exception("could not read latest task-run execution health")
         row = None
     if row is None:
         return {"state": "UNKNOWN", "reason": None, "retry_after": None}
@@ -221,6 +226,7 @@ def _fingerprint(payload: dict[str, Any]) -> str:
                                      default=str).encode("utf-8")).hexdigest()
 
 
+# health: allow CC,FUNC_LINES -- one ordered authoritative state table keeps transition precedence auditable
 def decide(conn, task: Any, *, status_override: str | None = None) -> dict[str, Any]:
     """Derive the one authoritative semantic and dispatch decision for ``task``."""
     from hermes_cli.kanban_administrative_hold import administrative_pending

@@ -610,6 +610,27 @@ function RecordedTokensSection({ task }: { task: KanbanTask }) {
   </Section>
 }
 
+function makeDrawerPriorityWriter(id: string, invalidate: () => void) {
+  const persist = makePriorityWriter({
+    fetch: () => fetchTask(id),
+    invalidate,
+    patch: body => patchTask(id, body)
+  })
+  return async (taskId: string, priority: number) => {
+    try {
+      return await persist(taskId, priority)
+    } catch (error) {
+      host.notify({ kind: 'error', message: errText(error) })
+      throw error
+    }
+  }
+}
+
+function unresolvedParentIds(detail: KanbanTaskDetail | undefined) {
+  const statuses = new Map((detail?.link_tasks ?? []).map(linked => [linked.id, linked.status]))
+  return (detail?.links.parents ?? []).filter(id => !['done', 'archived'].includes(statuses.get(id) ?? ''))
+}
+
 // Rough effort estimate via the auxiliary (auto-routed) model. Tokens +
 // complexity, never dollars — providers don't report cost reliably. Gated
 // behind an explicit click + disclaimer since it makes a model call. The
@@ -939,23 +960,7 @@ export function TaskDrawer({
       (err: unknown) => host.notify({ kind: 'error', message: errText(err) })
     )
 
-  // Priority write for the drawer's editor: PATCH the native field, then read
-  // the stored value back before the editor closes. A rejected write rethrows,
-  // so the editor keeps the operator's draft and the toast explains why.
-  const persistPriority = makePriorityWriter({
-    fetch: () => fetchTask(id!),
-    invalidate,
-    patch: body => patchTask(id!, body)
-  })
-  const priorityWriter = async (taskId: string, priority: number) => {
-    try {
-      return await persistPriority(taskId, priority)
-    } catch (err) {
-      host.notify({ kind: 'error', message: errText(err) })
-
-      throw err
-    }
-  }
+  const priorityWriter = makeDrawerPriorityWriter(id!, invalidate)
 
   const commentMut = useMutation({
     mutationFn: (body: string) => addComment(id!, body),
@@ -998,12 +1003,9 @@ export function TaskDrawer({
   // Linked tasks resolved to titles by the backend (`link_tasks`); absent on
   // older backends, where the chips fall back to short ids.
   const linkTitles = new Map((detail?.link_tasks ?? []).map(linked => [linked.id, linked.title]))
-  const linkStatuses = new Map((detail?.link_tasks ?? []).map(linked => [linked.id, linked.status]))
   // A completed prerequisite is provenance, not a current blocker.  Keep the
   // persisted link in the graph, but never present it under "Blocked by".
-  const activeParentIds = (detail?.links.parents ?? []).filter(
-    id => !['done', 'archived'].includes(linkStatuses.get(id) ?? '')
-  )
+  const activeParentIds = unresolvedParentIds(detail)
 
   const move = (status: string) => {
     if (!task || status === task.status) {

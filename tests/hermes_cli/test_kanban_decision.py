@@ -67,6 +67,33 @@ def test_t_6a127187_waiting_authority_is_never_claimed_or_decomposed(board):
     assert claim_allowed(board, task, "ready")[0] is False
 
 
+def test_t_6a127187_authority_grant_atomically_releases_existing_card(board):
+    tid = _task(board, "pruning live A/B", status="ready")
+    contract = _contract(board, tid, selected_next_action={
+        "phase": "WAITING_FOR_AUTHORITY", "type": "live_experiment",
+        "action": "Grant the live pruning A/B window", "resolver": "Adrian",
+        "resume_condition": "operator grant is recorded",
+    })
+    assert kb.recompute_ready(board) == 1
+    waiting = kb.get_task(board, tid)
+    assert (waiting.status, waiting.dispatch_eligible) == ("todo", True)
+    assert decide(board, waiting)["workflow_stage"] == "WAITING"
+
+    released_contract = dict(contract)
+    released_contract["selected_next_action"] = {
+        "phase": "READY", "type": "worker_action",
+        "action": "Run the authorised live pruning A/B",
+    }
+    kb._append_event(board, tid, "completion_requirements", released_contract)
+    kb._append_event(board, tid, "operator_authority_granted", {
+        "authority": "live pruning A/B window",
+    })
+    assert kb.recompute_ready(board) == 1
+    released = kb.get_task(board, tid)
+    assert (released.status, released.dispatch_eligible) == ("ready", True)
+    assert decide(board, released)["workflow_stage"] == "READY"
+
+
 def test_t_e5d24de5_review_flag_and_claim_guard_cannot_disagree(board):
     tid = _task(board, "dashboard review", status="review", eligible=False)
     _contract(board, tid)

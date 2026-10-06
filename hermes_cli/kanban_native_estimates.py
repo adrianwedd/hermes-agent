@@ -1,6 +1,7 @@
 """Persist the existing native estimate response through audited Kanban attachments."""
-import hashlib,json,time
+import hashlib,json,logging,time
 from pathlib import Path
+logger=logging.getLogger(__name__)
 
 def scope_hash(title,body):return hashlib.sha256(json.dumps([title or '',body or ''],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
 
@@ -22,7 +23,7 @@ def read_saved(conn,task_id,title,body):
     try:
         path=Path(row['stored_path'])
         if path.stat().st_size > 65536:return None
-        stored=json.loads(path.read_text());value=validate(stored)
+        stored=json.loads(path.read_text(encoding='utf-8-sig'));value=validate(stored)
         stamp=stored.get('created_at');digest=stored.get('scope_sha256')
         if type(stamp) is not int or stamp<=0 or not isinstance(digest,str) or len(digest)!=64:return None
         value.update(created_at=stamp,scope_sha256=digest,stale_scope=digest!=scope_hash(title,body),attachment_id=row['id'],provenance={'source':'native_estimate','trigger':'explicit_user_request','actor':'user','auxiliary_task':'kanban_estimator'})
@@ -39,5 +40,6 @@ def persist(conn,task_id,response,*,expected_scope,board=None,actor='user'):
     aid=kb.store_attachment_bytes(conn,task_id,f'native-estimate-{value["created_at"]}-{digest[:12]}.json',data,content_type='application/json',uploaded_by='codex-native-estimator',board=board)
     value['attachment_id']=aid
     try:kb.notify_task_updated(conn,task_id,['task_estimate'],board=board)
-    except Exception:pass  # Persistence succeeded; notification cannot erase that receipt.
+    except Exception:
+        logger.exception('estimate persisted but task-update notification failed')
     return value

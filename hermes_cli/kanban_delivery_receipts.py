@@ -8,7 +8,7 @@ _REPO=re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
 _NAMES={'published-delivery-receipt.json','delivery-receipt.json'}
 def _text(value,limit=1000):
     if not isinstance(value,str):return None
-    value=re.sub(r'(?:/Users/|/private/|/tmp/|file:)[^\s,;]+','[local path]',value)
+    value=re.sub(r'(?:/Users/|/private/|/tmp/|file:)[^\s,;]+','[local path]',value)  # no-tmp: ok — redacts legacy paths rather than creating them
     value=re.sub(r'(?i)\b(token|api[_ -]?key|password|secret|authorization)\s*[:=]\s*\S+',r'\1=[redacted]',value)
     return value[:limit]
 def _sha(value):return value if isinstance(value,str) and _SHA.fullmatch(value) else None

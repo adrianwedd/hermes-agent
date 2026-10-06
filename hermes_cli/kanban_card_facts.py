@@ -1,6 +1,7 @@
 from hermes_cli.kanban_worker_observability import registered_receipt
 """Read-only, credential-free card facts. No workers, model calls or lifecycle writes."""
-import json,re
+import json,logging,re
+logger=logging.getLogger(__name__)
 
 def text(value,limit=240):
     value=str(value or '')
@@ -21,7 +22,9 @@ def model_facts(config,task,preset_resolver):
             preset=preset_resolver(config.get('moa') or {},model)
             refs=[label(x) for x in preset.get('reference_models',[]) if x.get('enabled',True)]
             return dict(primary='MoA · '+label(preset.get('aggregator')),advisers=refs,basis='Configured route; observed runtime may differ')
-        except Exception:return dict(primary='MoA · unknown aggregator',advisers=[],basis='Configured route unresolved')
+        except Exception:
+            logger.exception('configured MoA route could not be resolved')
+            return dict(primary='MoA · unknown aggregator',advisers=[],basis='Configured route unresolved')
     return dict(primary=label({'provider':provider,'model':model}),advisers=[],basis='Configured route; observed runtime may differ')
 
 def card_facts(conn,tasks,config_for,preset_resolver):
@@ -59,7 +62,9 @@ def card_facts(conn,tasks,config_for,preset_resolver):
         owner=t.get('assignee')
         if owner not in configs:
             try:configs[owner]=config_for(owner or 'default')
-            except Exception:configs[owner]={}
+            except Exception:
+                logger.exception('effective profile config could not be loaded for %s', owner)
+                configs[owner]={}
         result[tid]={'dispatch':dispatch_facts(conn,t),'blocker':blocker,'progress':progress,'delivery':delivery_facts(conn,tid),'heartbeat_at':t.get('last_heartbeat_at'),'model':model_facts(configs[owner],t,preset_resolver)}
     return result
 
@@ -82,7 +87,9 @@ def token_facts(conn,task,read_session):
         if not sid:sid=registered_receipt(conn,task['id'],rid).get('worker_session_id')
         if not sid:unknown+=1;continue
         try:usage=read_session(profile,sid)
-        except Exception:usage=None
+        except Exception:
+            logger.exception('linked worker session usage could not be read')
+            usage=None
         fields=['input_tokens','output_tokens','cache_read_tokens','cache_write_tokens']
         if not usage or not any(type(usage.get(k)) is int and usage[k]>0 for k in fields):unknown+=1;continue
         known=all(type(usage.get(k)) is int and usage[k]>=0 for k in fields)

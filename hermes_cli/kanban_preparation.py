@@ -87,10 +87,15 @@ def runtime_facts(conn, task, grant):
     if facts['workspace_exists']:
         try:
             rev = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'],
-                                          text=True, timeout=5, stderr=subprocess.DEVNULL).strip()
+                                          text=True, encoding='utf-8', errors='replace', timeout=5,
+                                          stderr=subprocess.DEVNULL).strip()
             dirty = subprocess.check_output(['git', '-C', str(path), '-c', 'core.fsmonitor=false', 'status', '--porcelain',
-                                            '--untracked-files=all'], text=True, timeout=5).strip()
-            toplevel = subprocess.check_output(['git', '-C', str(path), 'rev-parse', '--show-toplevel'], text=True, timeout=5).strip()
+                                            '--untracked-files=all'], text=True, encoding='utf-8',
+                                           errors='replace', timeout=5).strip()
+            toplevel = subprocess.check_output(
+                ['git', '-C', str(path), 'rev-parse', '--show-toplevel'], text=True,
+                encoding='utf-8', errors='replace', timeout=5,
+            ).strip()
             facts['source_matches'] = rev == grant.get('source_revision') and not dirty and path.resolve() == Path(toplevel).resolve()
         except (OSError, ValueError, subprocess.SubprocessError):
             pass
@@ -142,16 +147,20 @@ def provision_authorised_workspace(grant):
         subprocess.run(
             ['git', 'clone', '--no-checkout', '--', remote, str(checkout)],
             check=True, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding='utf-8', errors='replace',
         )
         subprocess.run(
             ['git', '-C', str(checkout), 'checkout', '--detach', revision],
             check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding='utf-8', errors='replace',
         )
         head = subprocess.check_output(
-            ['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True, timeout=10,
+            ['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True,
+            encoding='utf-8', errors='replace', timeout=10,
         ).strip()
         origin = subprocess.check_output(
-            ['git', '-C', str(checkout), 'remote', 'get-url', 'origin'], text=True, timeout=10,
+            ['git', '-C', str(checkout), 'remote', 'get-url', 'origin'], text=True,
+            encoding='utf-8', errors='replace', timeout=10,
         ).strip()
         if head != revision or origin != remote:
             return False, 'provisioned_workspace_identity_mismatch'

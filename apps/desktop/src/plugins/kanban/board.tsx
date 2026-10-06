@@ -88,6 +88,51 @@ import { BoardSwitcher } from './board-switcher'
 import { TaskDrawer } from './drawer'
 import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
 import { OrchestrationPanel } from './orchestration'
+
+function useWorkerCardNavigation(setOpenId: (id: string | null) => void) {
+  const workerCard = useValue($workerCardRequest)
+  useEffect(() => {
+    if (!workerCard) return
+    $boardSlug.set(workerCard.board)
+    setOpenId(workerCard.card_id)
+    $workerCardRequest.set(null)
+  }, [workerCard, setOpenId])
+}
+
+function BackendReloadBanner({ archived, board }: { archived: boolean; board?: KanbanBoard }) {
+  const [reloading, setReloading] = useState(false)
+  const qc = useQueryClient()
+  const scope = useKanbanScope()
+  const slug = useValue($boardSlug)
+  const missingFacts = board?.columns.some(column => column.tasks.some(task => !task.card_facts))
+  const running = board?.columns.some(column => column.tasks.some(task => task.status === 'running'))
+  if (!missingFacts) return null
+  const reload = async () => {
+    if (!window.hermesDesktop?.recycleBackend) return
+    setReloading(true)
+    try {
+      const read = <T,>(path: string) => hermesApi<T>({ path, method: 'GET', connectionId: 'local', profile: null, passive: true })
+      const allBoards = await read<{ boards: { slug: string }[] }>('/api/plugins/kanban/boards')
+      if (!Array.isArray(allBoards.boards) || allBoards.boards.length === 0) throw new Error('Cannot verify all boards.')
+      const workers = await Promise.all(allBoards.boards.map(item => read<{ count: number }>(`/api/plugins/kanban/workers/active?board=${encodeURIComponent(item.slug)}`)))
+      if (workers.some(item => item.count !== 0)) throw new Error('Running workers remain on a board, or activity is unavailable.')
+      const idle = await read<{ idle: boolean | null }>('/api/health/idle')
+      if (idle.idle !== true) throw new Error('The primary backend cannot prove it is idle.')
+      if (!window.confirm('Load the Studio backend update in the approved idle window? This restarts the local model host.')) return
+      await window.hermesDesktop.recycleBackend(null)
+      await qc.invalidateQueries({ queryKey: boardKey(scope, slug, archived) })
+    } catch (error) {
+      host.notify({ kind: 'error', message: String(error) })
+    } finally {
+      setReloading(false)
+    }
+  }
+  return <div className="mx-4 mb-2 flex min-w-0 flex-wrap items-center gap-3 rounded border border-(--ui-stroke-tertiary) px-3 py-2 text-xs text-(--ui-text-tertiary)">
+    <span>Backend update pending. Loading it restarts the Studio local model host.</span>
+    <Button disabled={reloading || scope !== 'local' || running} size="xs" variant="outline" onClick={reload}>{reloading ? 'Checking idle state…' : 'Load backend update'}</Button>
+    <span>Requires an approved idle window; checks every board and the primary backend before restart.</span>
+  </div>
+}
 import { columnMeta, type KanbanBoard, type KanbanTask, type TaskEstimate } from './types'
 import {
   $newTaskLane,
@@ -1101,7 +1146,6 @@ export function KanbanBoardPage() {
   const scope = useKanbanScope()
   const slug = useValue($boardSlug)
   const [archived, setArchived] = useState(false)
-  const [backendReloading, setBackendReloading] = useState(false)
 
   // Live updates ride the events socket (bindApi); this interval is only the
   // slow heartbeat for socketless paths (OAuth remotes, dropped connections).
@@ -1112,13 +1156,7 @@ export function KanbanBoardPage() {
   })
 
   const [openId, setOpenId] = useState<null | string>(null)
-  const workerCard = useValue($workerCardRequest)
-  useEffect(() => {
-    if (!workerCard) return
-    $boardSlug.set(workerCard.board)
-    setOpenId(workerCard.card_id)
-    $workerCardRequest.set(null)
-  }, [workerCard])
+  useWorkerCardNavigation(setOpenId)
   const [addStatus, setAddStatus] = useState<null | string>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -1388,27 +1426,7 @@ export function KanbanBoardPage() {
         </div>
       </header>
 
-      {board?.columns.some(col => col.tasks.some(task => !task.card_facts)) && <div className="mx-4 mb-2 flex min-w-0 flex-wrap items-center gap-3 rounded border border-(--ui-stroke-tertiary) px-3 py-2 text-xs text-(--ui-text-tertiary)">
-        <span>Backend update pending. Loading it restarts the Studio local model host.</span>
-        <Button disabled={backendReloading || scope !== 'local' || board.columns.some(col => col.tasks.some(task => task.status === 'running'))} size="xs" variant="outline" onClick={async () => {
-          if (!window.hermesDesktop?.recycleBackend) return
-          setBackendReloading(true)
-          try {
-            const read = <T,>(path: string) => hermesApi<T>({ path, method: 'GET', connectionId: 'local', profile: null, passive: true })
-            const allBoards = await read<{ boards: { slug: string }[] }>('/api/plugins/kanban/boards')
-            if (!Array.isArray(allBoards.boards) || allBoards.boards.length === 0) throw new Error('Cannot verify all boards.')
-            const workers = await Promise.all(allBoards.boards.map(item => read<{ count: number }>(`/api/plugins/kanban/workers/active?board=${encodeURIComponent(item.slug)}`)))
-            if (workers.some(item => item.count !== 0)) throw new Error('Running workers remain on a board, or activity is unavailable.')
-            const idle = await read<{ idle: boolean | null }>('/api/health/idle')
-            if (idle.idle !== true) throw new Error('The primary backend cannot prove it is idle.')
-            if (!window.confirm('Load the Studio backend update in the approved idle window? This restarts the local model host.')) return
-            await window.hermesDesktop.recycleBackend(null)
-            await qc.invalidateQueries({ queryKey: boardKey(scope, slug, archived) })
-          } catch (error) { host.notify({ kind: 'error', message: String(error) }) }
-          finally { setBackendReloading(false) }
-        }}>{backendReloading ? 'Checking idle state…' : 'Load backend update'}</Button>
-        <span>Requires an approved idle window; checks every board and the primary backend before restart.</span>
-      </div>}
+      <BackendReloadBanner archived={archived} board={board} />
 
       {settingsOpen && <OrchestrationPanel />}
 

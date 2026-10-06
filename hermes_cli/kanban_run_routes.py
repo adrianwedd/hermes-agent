@@ -1,6 +1,7 @@
 """Exact run/session links only. Never derives historical routes from current config."""
-import json
+import json,logging
 from hermes_cli.kanban_worker_observability import registered_receipt
+logger=logging.getLogger(__name__)
 
 def slot(value):
  if not isinstance(value,dict):return None
@@ -25,7 +26,9 @@ def run_routes(conn,task,read_session):
   launch=route(meta.get('launch_route')) or route(startup.get('launch_route'));observed=route(meta.get('runtime_route'));basis='Worker-recorded runtime route' if observed else None;sid=meta.get('worker_session_id') or startup.get('worker_session_id')
   if isinstance(sid,str) and sid:
    try:session=read_session(profile,sid) or {}
-   except Exception:session={}
+   except Exception:
+    logger.exception('linked worker session route could not be read')
+    session={}
    records=session.get('observed_routes') or []
    primary=[x for x in records if not x.get('task') and x.get('api_call_count',0)>0]
    if primary:
