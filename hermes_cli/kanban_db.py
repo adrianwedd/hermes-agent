@@ -2330,7 +2330,9 @@ def _claim_and_open_run(
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
+    from hermes_cli.kanban_completion_workflow import ensure_scope_contract
     from hermes_cli.kanban_decision import claim_allowed
+    ensure_scope_contract(conn, task_id, authority="control_plane_claim_boundary")
     task = get_task(conn, task_id)
     allowed, decision = claim_allowed(
         conn, task, "review" if source_status == "review" else "ready"
