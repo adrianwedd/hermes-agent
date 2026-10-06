@@ -449,6 +449,33 @@ def test_completed_truth_closes_stale_blocked_state(board):
     assert kb.get_task(board, tid).status == "done"
 
 
+def test_accepted_completion_never_overrides_explicit_stop(board):
+    tid = _task(board, "accepted work under explicit stop", status="ready")
+    _contract(board, tid)
+    assert kb.block_task(
+        board, tid, reason="operator prohibited further transition", kind="needs_input",
+    ) is True
+    # Explicit stop is an operator/migration state, not a worker-selectable
+    # block_task kind. Preserve the real blocked event that supplies the
+    # ordinary semantic resume override, then apply the authority state.
+    board.execute(
+        "UPDATE tasks SET block_kind='explicit_stop',dispatch_eligible=0 WHERE id=?", (tid,),
+    )
+    _contract(
+        board, tid,
+        accepted_completed_actions=["bounded scope accepted"],
+        remaining_required_actions=[],
+    )
+    decision = decide(board, kb.get_task(board, tid))
+    assert decision["workflow_stage"] == "HELD"
+    assert decision["block_kind"] == "explicit_stop"
+    assert kb.recompute_ready(board) == 0
+    stopped = kb.get_task(board, tid)
+    assert (stopped.status, stopped.block_kind, stopped.dispatch_eligible) == (
+        "blocked", "explicit_stop", False,
+    )
+
+
 def test_recompute_preserves_native_scheduled_wait(board):
     """A future wake remains Scheduled rather than becoming held Todo."""
     tid = _task(board, "wait for maintenance window", status="scheduled", eligible=True)
