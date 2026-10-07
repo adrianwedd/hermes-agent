@@ -206,6 +206,18 @@ class GatewayKanbanWatchersMixin:
             except Exception as exc:
                 logger.warning("kanban notifier: artifact upload (%s) failed: %s", path, exc)
 
+    def _record_dispatcher_disabled(self, reason: str) -> None:
+        """One boot receipt for existing boards; a disabled loop has no ticks."""
+        try:
+            from hermes_cli import kanban_db as kb
+            dispatcher = _KanbanDispatcher(kb, None)
+            for slug in dispatcher._board_slugs():
+                with kb.pin_first_board_resolution():
+                    if kb.kanban_db_path(slug).exists():
+                        dispatcher.tick_once_for_board(slug, reason)
+        except Exception:
+            logger.debug("kanban dispatcher: disabled receipt unavailable", exc_info=True)
+
     def _kanban_dispatcher_boot(self) -> Optional[tuple]:
         """Resolve config, kanban_db and the singleton lock; None when the dispatcher must not run.
 
@@ -217,19 +229,23 @@ class GatewayKanbanWatchersMixin:
             from hermes_cli.config import load_config as _load_config
         except Exception:
             logger.warning("kanban dispatcher: config loader unavailable; disabled")
+            self._record_dispatcher_disabled("config_unavailable")
             return None
         env_override = os.environ.get("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "").strip().lower()
         if env_override in {"0", "false", "no", "off"}:
             logger.info("kanban dispatcher: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env")
+            self._record_dispatcher_disabled("gateway_disabled")
             return None
         try:
             cfg = _load_config()
         except Exception as exc:
             logger.warning("kanban dispatcher: cannot load config (%s); disabled", exc)
+            self._record_dispatcher_disabled("config_unavailable")
             return None
         kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
         if not kanban_cfg.get("dispatch_in_gateway", True):
             logger.info("kanban dispatcher: disabled via config kanban.dispatch_in_gateway=false")
+            self._record_dispatcher_disabled("gateway_disabled")
             return None
         try:
             from hermes_cli import kanban_db as _kb
@@ -297,6 +313,7 @@ class GatewayKanbanWatchersMixin:
                 # Emergency stop (`hermes pause`): no auto-decompose or
                 # dispatch while paused; running workers finish naturally.
                 if not _kanban_dispatch_allowed():
+                    results = await _to_thread_process_service(dispatcher.suppressed_tick, "gateway_paused")
                     bad_ticks = 0
                 else:
                     # Re-read the auto-decompose toggle live so disabling it
@@ -314,7 +331,7 @@ class GatewayKanbanWatchersMixin:
                     bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
                 now = int(time.time())
                 if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
-                    held = _kbd.describe_suppression(res for _slug, res in (results or []))
+                    held = _kbd.describe_suppression(res for _slug, res in (results or [])) or "unknown=1"
                     logger.warning(
                         "kanban dispatcher stuck: ready queue non-empty for "
                         "%d consecutive ticks but 0 workers spawned.%s Check "
