@@ -1122,6 +1122,19 @@ CREATE TABLE IF NOT EXISTS task_attachments (
     created_at   INTEGER NOT NULL
 );
 
+-- Board-local, coalesced dispatch episodes (bounded by the receipt writer).
+CREATE TABLE IF NOT EXISTS dispatch_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    state TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    ticks INTEGER NOT NULL,
+    ready_total INTEGER NOT NULL,
+    spawned INTEGER NOT NULL,
+    reasons TEXT NOT NULL
+);
+
 -- Subscription from a gateway source (platform + chat + thread) to a
 -- task. The gateway's kanban-notifier watcher tails task_events and
 -- pushes ``completed`` / ``blocked`` / ``spawn_auto_blocked`` events to

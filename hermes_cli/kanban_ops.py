@@ -91,6 +91,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
+        from hermes_cli.kanban_dispatch_evidence import read_evidence
+        evidence = read_evidence(conn) if getattr(args, "json", False) else []
     if getattr(args, "json", False):
         _print_json({
             **{k: getattr(res, k)
@@ -113,6 +115,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "rate_limited": res.rate_limited,
             "skipped_locked": res.skipped_locked,
             "memory_pressure": res.memory_pressure,
+            "ready_total": res.ready_total,
+            "suppression_reasons": kbd.suppression_reason_counts(res),
+            "dispatch_evidence": evidence,
         }, ascii=True)
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
@@ -129,6 +134,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             print(f"  {', '.join(items)}")
     print(f"Promoted:     {res.promoted}")
     print(f"Spawned:      {len(res.spawned)}")
+    held = kbd.describe_suppression([res])
+    if held:
+        print(f"Held back:    {held}")
     tag = " (dry)" if args.dry_run else ""
     for tid, who, ws in res.spawned:
         print(f"  - {tid}  ->  {who}  @ {ws or '-'}{tag}")
@@ -223,7 +231,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         if health_state["bad_ticks"] >= HEALTH_WINDOW:
             now = int(time.time())
             if now - health_state["last_warn_at"] >= 300:
-                held = kbd.describe_suppression([res])
+                held = kbd.describe_suppression([res]) or "unknown=1"
                 held = f" Last tick held back: {held}." if held else ""
                 print(
                     f"[{_fmt_ts(now)}] WARN dispatcher stuck: ready queue non-empty for "

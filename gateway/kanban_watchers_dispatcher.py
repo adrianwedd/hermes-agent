@@ -129,7 +129,7 @@ class _KanbanDispatcher:
 
     CORRUPT_BOARD_RETRY_AFTER_SECONDS = 300
 
-    def __init__(self, kb: Any, settings: _DispatcherSettings) -> None:
+    def __init__(self, kb: Any, settings: Optional[_DispatcherSettings]) -> None:
         self.kb = kb
         self.settings = settings
         self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
@@ -173,7 +173,7 @@ class _KanbanDispatcher:
         self.disabled_corrupt_boards.pop(slug, None)
         return True
 
-    def tick_once_for_board(self, slug: str) -> Optional[object]:
+    def tick_once_for_board(self, slug: str, suppression_reason: str | None = None) -> Optional[object]:
         """Run one dispatch_once for a specific board.
 
         The per-board DB is opened explicitly so boards never share a
@@ -182,8 +182,7 @@ class _KanbanDispatcher:
         conn = None
         fingerprint = self.board_db_fingerprint(slug)
         if not self._quarantine_lifted(slug, fingerprint):
-            return None
-        kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
+            return _kbd().DispatchResult(suppression_reasons={"board_quarantined": 1})
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
@@ -193,6 +192,14 @@ class _KanbanDispatcher:
             from hermes_cli import kanban_db as _kb
             with _kb.pin_first_board_resolution():
                 conn = _kbc().connect(board=slug)
+                if suppression_reason:
+                    from hermes_cli.kanban_dispatch_evidence import finish_tick
+                    result = _kbd().DispatchResult(suppression_reasons={suppression_reason: 1})
+                    with _kbc()._dispatch_tick_lock(self.kb.kanban_db_path(slug)) as held:
+                        result.skipped_locked = not held
+                        return finish_tick(conn, result, persist=held)
+                assert self.settings is not None, "dispatch settings required outside suppression-only ticks"
+                kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
                 return _kbd().dispatch_once(conn, board=slug, **kwargs)
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
@@ -205,9 +212,17 @@ class _KanbanDispatcher:
                     "then run `hermes kanban init` if you need a fresh board.",
                     slug, fingerprint[0],
                 )
-                return None
+                return _kbd().DispatchResult(suppression_reasons={"board_corrupt": 1})
             logger.exception("kanban dispatcher: tick failed on board %s", slug)
-            return None
+            result = getattr(exc, "dispatch_result", None)
+            if result is None:
+                result = _kbd().DispatchResult(suppression_reasons={"dispatch_error": 1})
+                if conn is not None:
+                    from hermes_cli.kanban_dispatch_evidence import finish_tick
+                    with _kbc()._dispatch_tick_lock(self.kb.kanban_db_path(slug)) as held:
+                        result.skipped_locked = not held
+                        finish_tick(conn, result, persist=held)
+            return result
         finally:
             if conn is not None:
                 with contextlib.suppress(Exception):
@@ -216,6 +231,10 @@ class _KanbanDispatcher:
     def tick_once(self) -> list[tuple[str, Optional[object]]]:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""
         return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
+
+    def suppressed_tick(self, reason: str) -> list[tuple[str, Optional[object]]]:
+        """Observe a watcher gate without reclaiming, claiming or spawning."""
+        return [(slug, self.tick_once_for_board(slug, reason)) for slug in self._board_slugs()]
 
     def ready_nonempty(self) -> bool:
         """Is there a ready+assigned+unclaimed task on ANY board the dispatcher would spawn for?
