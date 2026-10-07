@@ -8,15 +8,19 @@ function age(at: number | null | undefined, now = Date.now() / 1000) {
   return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`
 }
 
-// A MoA route whose aggregator or adviser slots were never recorded is NOT the same
-// statement as "this run took no route at all", and neither is the same as "the route is
-// unknown". The launch route names a configured route, so an absent one is Unknown; an
-// absent observed sub-slot is unrecorded evidence about a call that did happen.
+// Three different facts must never collapse into one word. A run that recorded NO route at
+// all; a MoA route whose aggregator/adviser sub-slots were never recorded; and a route that
+// genuinely could not be determined. Only the last deserves "Unknown", and only on the
+// launch line — the config it names can be missing. An OBSERVED route was either recorded or
+// it was not, so an absent one says "not recorded" instead of implying a data defect.
 export const NOT_RECORDED = 'not recorded'
+// The `Last observed:` line with no recorded route at all. The receipt path was asked and
+// answered "nothing recorded"; that is a recorded absence, not an unknown one.
+export const ROUTE_NOT_RECORDED = 'Route not recorded'
 
 /** The `Last observed:` line: the route the run's own calls are recorded as having taken. */
 export function observedRouteLabel(route: RecordedRoute | null | undefined) {
-  if (!route) return 'Unknown · no recorded route'
+  if (!route) return ROUTE_NOT_RECORDED
   if (route.provider === 'moa') {
     const aggregator = route.aggregator ? `${route.aggregator.provider} / ${route.aggregator.model}` : NOT_RECORDED
     const advisers = route.advisers?.length ? route.advisers.map(x => `${x.provider} / ${x.model}`).join(', ') : NOT_RECORDED

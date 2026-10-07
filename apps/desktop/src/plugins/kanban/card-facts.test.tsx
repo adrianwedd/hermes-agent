@@ -16,7 +16,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 // eslint-disable-next-line no-restricted-imports
 import { registerPluginLocales } from '@/i18n/plugin-i18n'
 
-import { CardFacts, launchRouteLabel, NOT_RECORDED, observedRouteLabel } from './card-facts'
+import { CardFacts, launchRouteLabel, NOT_RECORDED, observedRouteLabel, ROUTE_NOT_RECORDED } from './card-facts'
 import { KANBAN_LOCALES } from './i18n'
 import type { KanbanTask } from './types'
 
@@ -48,9 +48,12 @@ it('renders an explicit "not recorded" for a MoA route with no recorded sub-slot
   expect(label).not.toMatch(/unknown/i)
 })
 
-it('renders "no recorded route" for a null route, which is a different fact', () => {
-  expect(observedRouteLabel(null)).toBe('Unknown · no recorded route')
-  expect(observedRouteLabel(undefined)).toBe('Unknown · no recorded route')
+it('renders "not recorded" for a null route, which is a different fact', () => {
+  // The acceptance criterion: an absent OBSERVED route must not read "unknown". A null route
+  // is a recorded absence, not an unknown one, so it says so in its own words.
+  expect(observedRouteLabel(null)).toBe(ROUTE_NOT_RECORDED)
+  expect(observedRouteLabel(undefined)).toBe(ROUTE_NOT_RECORDED)
+  expect(observedRouteLabel(null)).not.toMatch(/unknown/i)
   // A null route is not the same statement as an unrecorded sub-slot.
   expect(observedRouteLabel(null)).not.toBe(NOT_RECORDED)
 })

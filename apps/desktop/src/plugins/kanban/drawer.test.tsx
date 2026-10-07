@@ -493,4 +493,26 @@ describe('recorded model routes', () => {
     // The defect this card was filed for: "unknown" for absent recorded evidence.
     expect(screen.queryByText(/aggregator: unknown/)).toBeNull()
   })
+
+  it('never prints the bare word "unknown" for a null observed route, on either line', async () => {
+    // The acceptance criterion, on the rendered surface rather than the label helper alone: a
+    // run with a launch route but no recorded observed route must not render "unknown" on the
+    // route lines. (Scoped to the route lines: other drawer sections legitimately use the
+    // word, e.g. "acceptance remain unknown".)
+    detail = withRoutes({
+      agent: 'implementer',
+      basis: 'Worker-recorded runtime route',
+      launch: { model: 'cloud', provider: 'moa' },
+      last_observed: null,
+      run_id: 489,
+      started_at: 1791274013
+    })
+    openDrawer()
+
+    expect(await screen.findByText(/Last observed: Route not recorded/)).toBeTruthy()
+    expect(screen.getByText(/Launch: MoA · preset cloud/)).toBeTruthy()
+    expect(document.body.textContent).not.toMatch(/Last observed: Unknown/)
+    expect(document.body.textContent).not.toMatch(/aggregator: unknown/)
+    expect(document.body.textContent).not.toMatch(/advisers: unknown/)
+  })
 })
