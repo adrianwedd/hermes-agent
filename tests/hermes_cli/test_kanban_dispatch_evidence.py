@@ -96,6 +96,51 @@ def test_nonspawn_tick_has_machine_readable_evidence(board, monkeypatch, case, r
         assert json.loads(row[0])[reason] >= 1
 
 
+@pytest.mark.parametrize("held", [False, True])
+def test_prelock_error_receipt_requires_board_lock(board, monkeypatch, held):
+    from hermes_cli import kanban_resume
+    conn, tid = board
+    locking = []
+    active = []
+    original_finish = kbd.finish_tick
+
+    @contextmanager
+    def lock(path):
+        locking.append(path)
+        active.append(held)
+        try:
+            yield held
+        finally:
+            active.pop()
+
+    def finish(conn, result, *, persist=True):
+        if persist:
+            assert active == [True], "error receipt written without dispatch lock"
+        return original_finish(conn, result, persist=persist)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected resume observation failure")
+
+    monkeypatch.setattr(kanban_resume, "observe_resume_conditions", fail)
+    monkeypatch.setattr(kbc, "_dispatch_tick_lock", lock)
+    monkeypatch.setattr(kbd, "finish_tick", finish)
+    before = conn.total_changes
+    with pytest.raises(RuntimeError, match="injected resume observation failure") as caught:
+        kbd.dispatch_once(conn)
+    result = caught.value.dispatch_result
+    assert locking == [kb.kanban_db_path()]
+    assert result.suppression_reasons == ({"dispatch_error": 1} if held else
+                                          {"dispatch_error": 1, "skipped_locked": 1})
+    assert result.skipped_locked is (not held)
+    rows = conn.execute("SELECT reasons FROM dispatch_evidence").fetchall()
+    if held:
+        assert len(rows) == 1
+        assert json.loads(rows[0][0]) == {"dispatch_error": 1}
+    else:
+        assert rows == []
+        assert conn.total_changes == before
+
+
 def test_stall_receipts_coalesce_survive_reopen_and_keep_recovery(board, monkeypatch):
     conn, tid = board
     monkeypatch.setattr(kbd, "check_respawn_guard", lambda *a, **kw: "active_pr")

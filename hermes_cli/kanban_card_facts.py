@@ -114,7 +114,12 @@ def card_facts(conn,tasks,config_for,preset_resolver):
         config,profile=configs[owner]
         model=(model_facts(config,t,preset_resolver) if profile['available'] else
                dict(primary='Unknown',advisers=[],basis='Profile configuration unavailable'))
-        result[tid]={'dispatch':dispatch_facts(conn,t),'blocker':blocker,'progress':progress,'delivery':delivery_facts(conn,tid),'heartbeat_at':t.get('last_heartbeat_at'),'model':model,'profile':profile}
+        dispatch=dispatch_facts(conn,t)
+        if not profile['available']:
+            # Profile availability is an execution gate, not a new semantic
+            # stage. Keep the canonical decision and board placement intact.
+            dispatch.update(dispatchable=False, worker_executable_now=False)
+        result[tid]={'dispatch':dispatch,'blocker':blocker,'progress':progress,'delivery':delivery_facts(conn,tid),'heartbeat_at':t.get('last_heartbeat_at'),'model':model,'profile':profile}
     return result
 
 def native_config_for(profile):

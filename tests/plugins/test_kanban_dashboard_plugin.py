@@ -1743,6 +1743,10 @@ def test_awaiting_acceptance_stays_a_dispatchable_review_lane(client, kanban_hom
     """REVIEW is a real lane: an unresolved review action can accept, reject or request
     changes, so an eligible review card is dispatchable when capacity exists. It is not
     an administrative holding pen."""
+    # Dispatchability presumes an available owner, not just a semantic lane.
+    profile = kanban_home / "profiles" / "reviewer"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model:\n  default: test\n")
     t = _seed_ready("in-review")
     with kbc.connect() as conn:
         conn.execute("UPDATE tasks SET status='review', assignee='reviewer' WHERE id=?", (t,))
@@ -1783,6 +1787,9 @@ def test_completed_review_under_an_operator_gate_is_operator_not_review(client, 
 def test_running_card_reports_the_owner_and_stays_in_its_lane(client, kanban_home):
     """RUNNING is a live claim, not a queue verdict: the card names whose handoff it is
     waiting on and is not re-presented as dispatchable work."""
+    profile = kanban_home / "profiles" / "implementer"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model:\n  default: test\n")
     now = int(time.time())
     t = _seed_ready("live-owner")
     lock = "lock-derived-stage"

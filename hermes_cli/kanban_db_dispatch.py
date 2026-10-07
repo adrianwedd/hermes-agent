@@ -2018,8 +2018,17 @@ def dispatch_once(
             observe_resume_conditions(conn, board=board)
     except Exception as exc:
         add_reason(result, "dispatch_error")
-        finish_tick(conn, result, persist=not dry_run)
         exc.dispatch_result = result
+        # Pre-lock probes can fail, but their receipt is still a board write.
+        # Never write beside the dispatcher that owns the single-writer lock.
+        try:
+            db_path = _kb.kanban_db_path(board=board)
+            with _kbc._dispatch_tick_lock(db_path) as held:
+                result.skipped_locked = not held
+                finish_tick(conn, result, persist=held and not dry_run)
+        except Exception:
+            add_reason(result, "dispatch_lock_unavailable")
+            finish_tick(conn, result, persist=False)
         raise
 
     def _locked_tick() -> DispatchResult:
@@ -2123,6 +2132,9 @@ def _dispatch_lane_task(
     # Capacity/admission is evaluated later and never rewrites semantic stage.
     reason = _canonical_claim_rejection(conn, task_id, lane, dry_run=dry_run)
     if reason is not None:
+        # Retain the per-card result consumed by dashboard parity and CLI
+        # callers, alongside the bounded machine-readable board aggregate.
+        result.respawn_guarded.append((task_id, reason))
         add_reason(result, reason)
         return False
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)

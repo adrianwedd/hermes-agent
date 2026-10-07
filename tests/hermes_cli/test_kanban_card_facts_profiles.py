@@ -67,6 +67,55 @@ def test_unavailable_profile_is_quiet_and_rechecked(board, caplog, owner):
         assert not _logs(caplog)
 
 
+@pytest.mark.parametrize("owner,reason", [
+    ("missing-worker", "unknown_profile"), ("../invalid", "invalid_profile"),
+    ("broken-worker", "config_load_failed"),
+])
+def test_eligible_unavailable_owner_keeps_stage_but_cannot_execute(board, owner, reason):
+    home, conn = board
+    if reason == "config_load_failed":
+        profile = home / "profiles" / owner
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text("model: [broken\n")
+    tid = kb.create_task(conn, title="Authorised action", assignee=owner)
+    stored = kb.get_task(conn, tid)
+    assert stored is not None
+    task = asdict(stored)
+    assert task["dispatch_eligible"] == 1
+    canonical = dispatch_facts(conn, task)
+    assert canonical["stage"] == "READY" and canonical["dispatchable"]
+    before = conn.total_changes
+    for _ in range(3):
+        card = _poll(conn, task)
+        assert card["profile"]["reason_code"] == reason
+        assert card["dispatch"]["dispatchable"] is False
+        assert card["dispatch"]["worker_executable_now"] is False
+        for key in canonical.keys() - {"dispatchable", "worker_executable_now"}:
+            assert card["dispatch"][key] == canonical[key]
+    assert conn.total_changes == before
+    stored = kb.get_task(conn, tid)
+    assert stored is not None
+    assert asdict(stored) == task
+    if reason != "config_load_failed":
+        assert not (home / "profiles").exists()
+
+    # Repair the owner, not its authorised semantic stage or eligibility.
+    (home / "config.yaml").write_text("model:\n  provider: test\n  default: recovered\n")
+    conn.execute("UPDATE tasks SET assignee='default' WHERE id=?", (tid,))
+    conn.commit()
+    stored = kb.get_task(conn, tid)
+    assert stored is not None
+    task = asdict(stored)
+    before = conn.total_changes
+    card = _poll(conn, task)
+    assert card["profile"]["available"] is True
+    assert card["dispatch"] == dispatch_facts(conn, task)
+    assert card["dispatch"]["stage"] == "READY"
+    assert card["dispatch"]["dispatchable"] is True
+    assert card["dispatch"]["worker_executable_now"] is True
+    assert conn.total_changes == before
+
+
 def test_unexpected_config_failure_is_observable_without_poll_flood(board, caplog):
     home, conn = board
     profile = home / "profiles" / "analyst"
