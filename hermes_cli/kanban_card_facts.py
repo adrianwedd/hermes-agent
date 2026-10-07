@@ -1,7 +1,56 @@
 from hermes_cli.kanban_worker_observability import registered_receipt
 """Read-only, credential-free card facts. No workers, model calls or lifecycle writes."""
 import json,logging,re
+from collections import OrderedDict
+from threading import Lock
+from time import monotonic
+
 logger=logging.getLogger(__name__)
+# Diagnostics only: never cache a failed lookup, so newly valid profiles heal
+# on the next poll. Bound process memory and periodically remind about outages.
+_CONFIG_FAILURE_LOGS = OrderedDict()
+_CONFIG_FAILURE_LOCK = Lock()
+_CONFIG_FAILURE_LOG_INTERVAL = 300
+_CONFIG_FAILURE_LOG_LIMIT = 256
+
+
+class ProfileUnavailable(ValueError):
+    """Expected owner identity failure, distinct from config loading failures."""
+
+    def __init__(self, reason_code, reason):
+        super().__init__(reason)
+        self.reason_code = reason_code
+
+
+def _profile_config(profile, config_for):
+    from hermes_constants import hermes_home_key
+
+    key = (hermes_home_key(), profile)
+    info: dict = dict(name=profile, available=True, reason_code=None, reason=None)
+    try:
+        config = config_for(profile)
+    except ProfileUnavailable as exc:
+        config = None
+        info.update(available=False, reason_code=exc.reason_code, reason=str(exc))
+    except Exception as exc:
+        info.update(available=False, reason_code='config_load_failed',
+                    reason=f'Effective profile configuration could not be loaded ({type(exc).__name__})')
+        now = monotonic()
+        with _CONFIG_FAILURE_LOCK:
+            last = _CONFIG_FAILURE_LOGS.get(key)
+            report = last is None or now - last >= _CONFIG_FAILURE_LOG_INTERVAL
+            if report:
+                _CONFIG_FAILURE_LOGS[key] = now
+                _CONFIG_FAILURE_LOGS.move_to_end(key)
+                while len(_CONFIG_FAILURE_LOGS) > _CONFIG_FAILURE_LOG_LIMIT:
+                    _CONFIG_FAILURE_LOGS.popitem(last=False)
+        if report:
+            logger.exception('effective profile config could not be loaded for %s', text(profile))
+        return None, info
+    # A resolved or expected-unavailable owner ends the unexpected outage.
+    with _CONFIG_FAILURE_LOCK:
+        _CONFIG_FAILURE_LOGS.pop(key, None)
+    return config, info
 
 def text(value,limit=240):
     value=str(value or '')
@@ -59,13 +108,13 @@ def card_facts(conn,tasks,config_for,preset_resolver):
             if not t.get('current_run_id'):
                 run=conn.execute("SELECT summary,ended_at FROM task_runs WHERE task_id=? AND summary IS NOT NULL ORDER BY id DESC LIMIT 1",(tid,)).fetchone()
                 if run and run[0]:progress={'text':text(run[0]),'at':run[1],'basis':'Latest retained run handoff'}
-        owner=t.get('assignee')
+        owner=t.get('assignee') or 'default'
         if owner not in configs:
-            try:configs[owner]=config_for(owner or 'default')
-            except Exception:
-                logger.exception('effective profile config could not be loaded for %s', owner)
-                configs[owner]={}
-        result[tid]={'dispatch':dispatch_facts(conn,t),'blocker':blocker,'progress':progress,'delivery':delivery_facts(conn,tid),'heartbeat_at':t.get('last_heartbeat_at'),'model':model_facts(configs[owner],t,preset_resolver)}
+            configs[owner]=_profile_config(owner,config_for)
+        config,profile=configs[owner]
+        model=(model_facts(config,t,preset_resolver) if profile['available'] else
+               dict(primary='Unknown',advisers=[],basis='Profile configuration unavailable'))
+        result[tid]={'dispatch':dispatch_facts(conn,t),'blocker':blocker,'progress':progress,'delivery':delivery_facts(conn,tid),'heartbeat_at':t.get('last_heartbeat_at'),'model':model,'profile':profile}
     return result
 
 def native_config_for(profile):
@@ -73,7 +122,13 @@ def native_config_for(profile):
     from hermes_cli.profiles import resolve_profile_env
     from hermes_cli.config_effective import load_user_config_effective
     from hermes_constants import set_hermes_home_override,reset_hermes_home_override
-    home=resolve_profile_env(profile);token=set_hermes_home_override(home)
+    try:
+        home=resolve_profile_env(profile)
+    except FileNotFoundError as exc:
+        raise ProfileUnavailable('unknown_profile', 'Assignee does not resolve to a live profile') from exc
+    except ValueError as exc:
+        raise ProfileUnavailable('invalid_profile', 'Assignee is not a valid profile name') from exc
+    token=set_hermes_home_override(home)
     try:return load_user_config_effective(Path(home)/'config.yaml',fail_closed=True)
     finally:reset_hermes_home_override(token)
 
