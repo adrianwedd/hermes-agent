@@ -6,6 +6,7 @@ The command must finish its own children before returning. No detached probe mod
 """
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -34,6 +35,26 @@ def probe_environment(root: Path) -> dict[str, str]:
     return env
 
 
+PROBE_TIMEOUT_SECONDS = 600
+
+
+def run_probe(command: list[str], root: Path) -> int:
+    """Reap the probe and terminate its POSIX process group before removing its home."""
+    process = subprocess.Popen(command, env=probe_environment(root), cwd=root,
+                               start_new_session=(os.name == "posix"))
+    try:
+        return process.wait(timeout=PROBE_TIMEOUT_SECONDS)
+    finally:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)  # windows-footgun: ok -- POSIX branch only
+            except ProcessLookupError:
+                pass
+        elif process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+
+
 def main(argv: list[str] | None = None) -> int:
     command = list(sys.argv[1:] if argv is None else argv)
     if command[:1] == ["--"]:
@@ -42,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("usage: run_kanban_probe.py -- <command> [arguments...]")
     with tempfile.TemporaryDirectory(prefix="hermes-kanban-probe-") as temporary:
         root = Path(temporary).resolve()
-        return subprocess.run(command, env=probe_environment(root), cwd=root, check=False, timeout=600).returncode
+        return run_probe(command, root)
 
 
 if __name__ == "__main__":
