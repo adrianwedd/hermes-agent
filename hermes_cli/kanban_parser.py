@@ -167,7 +167,7 @@ _SPECS = [
         _arg("--assignee", help="Profile name to assign"),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
         _arg("--workspace",
-             help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "
+             help="scratch | worktree | worktree:<path> | dir:<path> (default: operator persistent folder when configured, otherwise scratch; "
                   "an explicit 'scratch' also opts out of a project-scoped board's project)"),
         _arg("--branch", help="Branch name for worktree tasks, e.g. wt/t6-wire"),
         _arg("--project",

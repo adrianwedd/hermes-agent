@@ -10,6 +10,38 @@ description: "Durable SQLite-backed task board for coordinating multiple Hermes 
 
 Hermes Kanban is a durable task board, shared across all your Hermes profiles, that lets multiple named agents collaborate on work without fragile in-process subagent swarms. Every task is a row in `~/.hermes/kanban.db`; every handoff is a row anyone can read and write; every worker is a full OS process with its own identity.
 
+### Authorizing new boards and isolating tests
+
+Set `kanban.board_creation_allowlist: []` in the shared Kanban home's configuration
+to prevent new boards. Existing boards remain available. An operator can authorize
+one exact new slug by adding it to that list; there is no wildcard or CLI bypass.
+The policy applies to dashboard/CLI creation, metadata creation, import (including
+automatically suffixed names), and implicit database creation. An omitted or null
+setting retains legacy provisioning behavior.
+
+Use `python scripts/run_kanban_probe.py -- <command> ...` for ad hoc acceptance
+checks. It uses a fresh temporary home, pins all Kanban paths to it, removes worker
+identity and production environment pins, and cleans up after the command exits.
+The probe uses the isolated Default board; new named boards are locked. Keep probe
+processes attached and finish all children before returning. Do not copy production
+configuration or use double-fork helpers to bypass worker authority checks.
+The regular Python suite continues to use `scripts/run_tests.sh` and its hermetic fixtures.
+
+### Persistent local task folder
+
+For local tasks without a repository, set `kanban.persistent_workdir` to an
+absolute operator-owned folder in the shared Kanban home's `config.yaml`.
+Omitted workspaces then resolve to `dir` in that folder across CLI, dashboard,
+agent creation, decomposition and dispatch. Explicit task subdirectories must
+remain under it. New tasks cannot select scratch, worktree, project or branch
+settings, and do not inherit board or creator projects. The dashboard displays
+the effective folder even when older board metadata still names a repository.
+
+Existing tasks retain their recorded paths and files. Missing legacy workspaces
+are not silently recreated; unresolved tasks use the persistent folder. Completion,
+parent cleanup and workspace garbage collection retain task files under this policy.
+No existing board or task data is migrated or deleted. Provider routing is independent.
+
 ### Completion checkpoints before the iteration cap
 
 Dispatcher-owned workers get one checkpoint notice near 90% of their finite iteration

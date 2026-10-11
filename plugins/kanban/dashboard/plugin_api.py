@@ -1368,6 +1368,11 @@ def _board_counts(slug: str) -> dict[str, int]:
 
 def _default_workspace_kind(board: dict[str, Any]) -> str:
     """Recommend a non-destructive task workspace from board metadata."""
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    root = persistent_root()
+    if root is not None:
+        board.update(default_workdir=str(root), project_id=None)
+        return "dir"
     workdir = str(board.get("default_workdir") or "").strip()
     if not workdir:
         return "scratch"

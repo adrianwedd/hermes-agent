@@ -662,6 +662,8 @@ def write_board_metadata(
     "" = clear (``project_id`` is not validated here)."""
     _assert_not_delegated_child_mutation()
     slug = _slug_or_default(board)
+    from hermes_cli.kanban_board_authorization import require_board_creation
+    require_board_creation(slug)
     meta = read_board_metadata(slug)
     # db_path is derived on every read; never persist it into board.json.
     meta.pop("db_path", None)
@@ -1365,17 +1367,10 @@ def create_task(
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
         raise ValueError(f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}")
-    # A project-scoped board anchors every new task to its project's repo
-    # (deterministic worktree + branch) without each surface repeating it.
-    # An explicit ``scratch`` (or ``project_id=""``) is a request for no project:
-    # it must not be upgraded to a worktree in the board's repo (#106342).
-    if project_id is None and workspace_kind != "scratch":
-        try:
-            project_id = (_board_meta_for(board).get("project_id") or "").strip() or None
-        except Exception:
-            pass
-    if workspace_kind is None:
-        workspace_kind = "scratch"
+    from hermes_cli.kanban_persistent_workspace import creation_defaults
+    workspace_kind, workspace_path, project_id, project_source_task_id = creation_defaults(
+        workspace_kind, workspace_path, project_id, project_source_task_id, branch_name, board,
+    )
     if workspace_kind not in VALID_WORKSPACE_KINDS:
         raise ValueError(
             f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "

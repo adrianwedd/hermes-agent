@@ -316,7 +316,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
             "WHERE status = 'archived'"
         ).fetchall()
-        for row in rows:
+        from hermes_cli.kanban_persistent_workspace import persistent_root
+        for row in ([] if persistent_root() is not None else rows):
             if row["workspace_kind"] == "worktree":
                 # Backstop for worktrees that escaped the completion/archive hook.
                 # Same safety predicate: only clean, fully-pushed worktrees go.

@@ -356,6 +356,10 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     so cleanup never blocks completion. ``scratch`` is removed; ``worktree``
     only when provably free of work (clean tree, every commit reachable from a
     remote-tracking ref); ``dir`` is intentionally preserved."""
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    if persistent_root() is not None:
+        _cleanup_worker_tmux(conn, task_id)
+        return
     try:
         row = conn.execute(_WORKSPACE_ROW_SQL, (task_id,)).fetchone()
         if not row:
@@ -423,6 +427,9 @@ def _cleanup_worktree_workspace(
     ref; any doubt (dirty, unpushed, unresolvable repo, failing git) preserves
     it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
     branches are kept. Best-effort."""
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    if persistent_root() is not None:
+        return
     try:
         from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
     except Exception:
@@ -494,6 +501,9 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
 
     See #33774.
     """
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    if persistent_root() is not None:
+        return
     try:
         parents = conn.execute(
             "SELECT parent_id FROM task_links WHERE child_id = ?",
@@ -707,6 +717,10 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     every worktree lands under a board-owned repo (``<repo>/.worktrees/<id>``)
     instead of the dispatcher's incidental CWD (whatever dir the gateway was
     launched from); with no anchor configured we fail loudly rather than guess."""
+    from hermes_cli.kanban_persistent_workspace import execution_workspace
+    persistent = execution_workspace(task)
+    if persistent is not None:
+        return persistent, task.branch_name or ""
     branch_name = (task.branch_name or "").strip() or f"wt/{task.id}"
     if not task.workspace_path:
         board_slug = board if board else _kb.get_current_board()
@@ -784,6 +798,10 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     a concrete path is created/reused, none -> the board's ``default_workdir``
     (raises if unset rather than guessing). Persist via ``set_workspace_path``.
     """
+    from hermes_cli.kanban_persistent_workspace import execution_workspace
+    persistent = execution_workspace(task)
+    if persistent is not None:
+        return persistent
     kind = task.workspace_kind or "scratch"
     if kind == "worktree":
         return _resolve_worktree_workspace(task, board=board)[0]

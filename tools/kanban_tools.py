@@ -1127,7 +1127,8 @@ def _handle_create(args: dict, **kw) -> str:
                       or (self_task.session_id if self_task else None)
                       or _persisted_session_id(_current_origin_session_id())
                       or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))
-        if project_id is None and workspace_kind is None and workspace_path is None:
+        from hermes_cli.kanban_persistent_workspace import persistent_root
+        if persistent_root() is None and project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
         new_tid = kb.create_task(

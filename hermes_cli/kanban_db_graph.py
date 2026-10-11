@@ -194,6 +194,10 @@ def _insert_decomposed_child(
         child_ws_path = root_row["workspace_path"]
     else:
         child_ws_path = None
+    from hermes_cli.kanban_persistent_workspace import creation_workspace
+    persistent_path = creation_workspace(child.get("workspace_kind"), child.get("workspace_path"), None, None)
+    if persistent_path is not None:
+        child_ws_kind, child_ws_path = "dir", persistent_path
     new_id = _new_task_id()
     body = child.get("body")
     conn.execute(

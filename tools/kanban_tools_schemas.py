@@ -439,9 +439,10 @@ KANBAN_CREATE_SCHEMA = _schema(
             "type": "string",
             "enum": ["scratch", "dir", "worktree"],
             "description": (
-                "Workspace flavor: 'scratch' (fresh tmp dir, "
-                "default), 'dir' (shared directory, requires "
-                "absolute workspace_path), 'worktree' (git worktree)."
+                "Omit to use the operator's workspace default. With kanban.persistent_workdir, "
+                "only 'dir' is allowed, paths must stay under that folder, and files are retained. "
+                "Otherwise: 'scratch' (fresh temporary directory), 'dir' (persistent directory), "
+                "or 'worktree' (git worktree)."
             ),
         },
         "workspace_path": _prop("string", (
