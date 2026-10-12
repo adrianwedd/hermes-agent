@@ -308,6 +308,7 @@ class GatewayKanbanWatchersMixin:
                     # Qualified implementation/review work must not wait behind
                     # an off-turn intake model request or its recovery timeout.
                     if _ad_enabled:
+                        await _to_thread_process_service(dispatcher.prepare_todo_tick)
                         await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
                     ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
                     bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
