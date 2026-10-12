@@ -1371,15 +1371,18 @@ def _default_workspace_kind(board: dict[str, Any]) -> str:
     from hermes_cli.kanban_persistent_workspace import persistent_root
     root = persistent_root()
     if root is not None:
-        board.update(default_workdir=str(root), project_id=None)
+        project_id = board.get("project_id")
+        if project_id:
+            _pid, _name, primary_path = _resolve_project(str(project_id))
+            if primary_path:
+                board["default_workdir"] = primary_path
+        else:
+            board["default_workdir"] = str(root)
         return "dir"
     workdir = str(board.get("default_workdir") or "").strip()
     if not workdir:
         return "scratch"
-    try:
-        return "worktree" if kbw._git_toplevel(Path(workdir)) else "dir"
-    except (OSError, ValueError):
-        return "dir"
+    return "dir"
 
 
 def _annotate_board_meta(meta: dict) -> dict:

@@ -1257,8 +1257,8 @@ def _resolve_project_link(
 ) -> tuple[Optional[str], Any, Optional[str], str]:
     """``(project_id, project_obj, project_repo, workspace_kind)`` for ``create_task``.
 
-    A project-linked task is anchored to the project's primary repo as a
-    worktree with a deterministic branch (slug + task id). Projects live in the
+    With the persistent workspace policy active, a project-linked task uses the
+    project's canonical checkout directly. Projects live in the
     creator's per-profile projects.db, but the stored repo path is absolute so
     the cross-profile dispatcher needs no projects.db access. ``project_repo``
     is set when the worktree path must still be derived from the new task id.
@@ -1281,11 +1281,26 @@ def _resolve_project_link(
         if project_obj is not None and workspace_kind == "scratch":
             workspace_kind = "worktree"
     if project_obj is None:
+        from hermes_cli.kanban_persistent_workspace import persistent_root
+        if persistent_root() is not None:
+            raise ValueError(f"project {project_id!r} has no resolvable canonical repository")
         # Unresolvable id/slug: drop the link (never a dangling reference,
         # never a crash) and create an ordinary scratch task.
         return None, None, None, workspace_kind
-    # Canonicalise (a slug may have been passed) and anchor the worktree
-    # under the project's primary repo.
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    if persistent_root() is not None:
+        canonical = project_repo or (str(project_obj.primary_path) if project_obj.primary_path else None)
+        if not canonical:
+            raise ValueError(f"project {project_id!r} has no canonical repository path")
+        canonical_path = Path(canonical).expanduser()
+        if not canonical_path.is_absolute() or not canonical_path.is_dir():
+            raise ValueError(f"project {project_id!r} canonical repository is unavailable: {canonical}")
+        canonical_path = canonical_path.resolve()
+        if workspace_path and Path(workspace_path).expanduser().resolve() != canonical_path:
+            raise ValueError("project tasks must use the project's canonical repository")
+        return project_obj.id, project_obj, str(canonical_path), "dir"
+
+    # Legacy behaviour without the persistent workspace policy.
     if workspace_kind == "scratch" and project_obj.primary_path:
         workspace_kind = "worktree"
     if workspace_kind == "worktree" and workspace_path is None and project_obj.primary_path:
@@ -1436,6 +1451,8 @@ def create_task(
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
+    if workspace_kind == "dir" and project_repo is not None:
+        workspace_path = project_repo
     # Invariant check AFTER the project link resolves: a scratch request on a
     # project-scoped board is upgraded to a worktree there, and its path is
     # materialised below, so the pair that gets persisted is what must hold.
@@ -2389,6 +2406,10 @@ def _claim_and_open_run(
     return run_id
 
 
+from hermes_cli.kanban_persistent_workspace import workspace_claim_guard
+
+
+@workspace_claim_guard
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
@@ -2424,6 +2445,7 @@ def claim_task(
     return claimed
 
 
+@workspace_claim_guard
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,

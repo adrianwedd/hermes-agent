@@ -1,4 +1,6 @@
-"""Operator-owned directory policy shared by every Kanban entry point."""
+"""Operator-owned workspace policy shared by every Kanban entry point."""
+import contextlib
+import sqlite3
 from pathlib import Path
 
 
@@ -18,12 +20,14 @@ def persistent_root() -> Path | None:
 
 
 def creation_workspace(kind, path, project_id, branch_name):
-    """Return a persistent task directory, or None when the policy is unset."""
+    """Return the configured local-task directory, or None when policy is unset."""
     root = persistent_root()
     if root is None:
         return None
-    if kind not in (None, "dir") or project_id or branch_name:
-        raise ValueError("Kanban uses persistent directories; scratch, worktree, project and branch are disabled")
+    if kind not in (None, "dir") or branch_name:
+        raise ValueError("Kanban uses canonical repositories or persistent directories; scratch, worktree and branch are disabled")
+    if project_id:
+        return None
     target = Path(path).expanduser() if path else root
     if not target.is_absolute() or not target.resolve().is_relative_to(root):
         raise ValueError(f"Kanban workspace must be an ordinary directory under {root}")
@@ -31,17 +35,32 @@ def creation_workspace(kind, path, project_id, branch_name):
 
 
 def creation_defaults(kind, path, project_id, source_task_id, branch_name, board):
-    """Resolve local policy before considering legacy board project defaults."""
+    """Choose a canonical repository or the configured local-task directory."""
     from hermes_cli import kanban_db as kb
 
-    persistent = creation_workspace(kind, path, project_id, branch_name)
-    if persistent is not None:
-        return "dir", persistent, "", None
-    # Explicit scratch and an empty project id opt out of board inheritance.
-    if project_id is None and kind != "scratch":
+    root = persistent_root()
+    if root is None:
+        # Legacy behaviour when the operator has not enabled this policy.
+        if project_id is None and kind != "scratch":
+            board_project = kb._board_meta_for(board).get("project_id")
+            project_id = (board_project.strip() or None) if isinstance(board_project, str) else None
+        return "scratch" if kind is None else kind, path, project_id, source_task_id
+
+    if kind not in (None, "dir") or branch_name:
+        raise ValueError(
+            "Kanban uses canonical repositories or persistent directories; "
+            "scratch, worktree and branch are disabled"
+        )
+    # None inherits an explicitly configured board project. Empty string is the
+    # supported opt-out for a local-only task.
+    if project_id is None:
         board_project = kb._board_meta_for(board).get("project_id")
         project_id = (board_project.strip() or None) if isinstance(board_project, str) else None
-    return "scratch" if kind is None else kind, path, project_id, source_task_id
+    project_id = (str(project_id).strip() or None) if project_id is not None else None
+    if project_id:
+        return "dir", path, project_id, source_task_id
+    persistent = creation_workspace(kind, path, None, branch_name)
+    return "dir", persistent, "", None
 
 
 def execution_workspace(task) -> Path | None:
@@ -62,3 +81,90 @@ def execution_workspace(task) -> Path | None:
         path = root
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def workspace_owned_by_other(conn, task_id: str, path: str | Path) -> bool:
+    """Whether another live claim owns an overlapping workspace, fail closed."""
+    from hermes_cli.kanban_db_dispatch import _worker_alive
+    from hermes_cli.kanban_db_workspace import _sibling_board_db_files
+
+    target = Path(path).expanduser().resolve()
+
+    def overlaps(value) -> bool:
+        if not value:
+            return False
+        other = Path(value).expanduser().resolve()
+        return target == other or target in other.parents or other in target.parents
+
+    def occupied(database, *, current: bool) -> bool:
+        rows = database.execute(
+            "SELECT id, workspace_path FROM tasks WHERE workspace_path IS NOT NULL "
+            "AND (status = 'running' OR current_run_id IS NOT NULL "
+            "OR worker_pid IS NOT NULL OR claim_lock IS NOT NULL)"
+        )
+        for row in rows:
+            if (not current or row[0] != task_id) and overlaps(row[1]):
+                return True
+        runs = database.execute(
+            "SELECT t.id, t.workspace_path, r.worker_pid, r.worker_started_at "
+            "FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+            "WHERE r.worker_pid IS NOT NULL"
+        )
+        for row in runs:
+            if (not current or row[0] != task_id) and overlaps(row[1]) and _worker_alive(row[2], row[3]):
+                return True
+        return False
+
+    try:
+        if occupied(conn, current=True):
+            return True
+        for db_file in _sibling_board_db_files(conn):
+            with sqlite3.connect(db_file.as_uri() + "?mode=ro", uri=True, timeout=1) as other:
+                if occupied(other, current=False):
+                    return True
+    except (OSError, sqlite3.Error):
+        return True
+    return False
+
+
+@contextlib.contextmanager
+def _workspace_claim_lock(home: Path):
+    """Serialize the cross-board ownership check with the claim commit."""
+    from gateway.status import _release_file_lock, _try_acquire_file_lock
+
+    path = home / "kanban" / ".workspace-ownership.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        if not _try_acquire_file_lock(handle):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            _release_file_lock(handle)
+
+
+def workspace_claim_guard(fn):
+    """Exclude overlapping directory writers until their durable claim ends."""
+    from functools import wraps
+
+    @wraps(fn)
+    def guarded(conn, task_id, **kwargs):
+        from hermes_cli import kanban_db as kb
+
+        task = kb.get_task(conn, task_id)
+        if task is None:
+            return None
+        with _workspace_claim_lock(kb.kanban_home()) as acquired:
+            if not acquired:
+                return None
+            task = kb.get_task(conn, task_id)
+            if task is None:
+                return None
+            if task.workspace_path and workspace_owned_by_other(
+                conn, task_id, task.workspace_path,
+            ):
+                return None
+            return fn(conn, task_id, **kwargs)
+
+    return guarded

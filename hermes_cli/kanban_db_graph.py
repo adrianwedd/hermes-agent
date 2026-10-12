@@ -195,10 +195,12 @@ def _insert_decomposed_child(
         child_ws_path = _normalize_workspace_path(root_row["workspace_path"])
     else:
         child_ws_path = None
-    from hermes_cli.kanban_persistent_workspace import creation_workspace
-    persistent_path = creation_workspace(child.get("workspace_kind"), child.get("workspace_path"), None, None)
-    if persistent_path is not None:
-        child_ws_kind, child_ws_path = "dir", persistent_path
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    if persistent_root() is not None:
+        if child.get("workspace_kind") not in (None, "dir"):
+            raise ValueError("decomposed tasks cannot create scratch or worktree workspaces")
+        child_ws_kind = "dir"
+        child_ws_path = child.get("workspace_path") or root_row["workspace_path"] or str(persistent_root())
     # Decomposition is a supported write path: a child asking for a 'dir'
     # workspace must name one. The inherited path is only ever a real path when
     # the kinds match, so a 'dir' child under a scratch root used to fall

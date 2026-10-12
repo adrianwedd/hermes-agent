@@ -31,11 +31,13 @@ The regular Python suite continues to use `scripts/run_tests.sh` and its hermeti
 
 For local tasks without a repository, set `kanban.persistent_workdir` to an
 absolute operator-owned folder in the shared Kanban home's `config.yaml`.
-Omitted workspaces then resolve to `dir` in that folder across CLI, dashboard,
-agent creation, decomposition and dispatch. Explicit task subdirectories must
-remain under it. New tasks cannot select scratch, worktree, project or branch
-settings, and do not inherit board or creator projects. The dashboard displays
-the effective folder even when older board metadata still names a repository.
+Local-only omitted workspaces resolve to `dir` in that folder across CLI,
+dashboard, agent creation, decomposition and dispatch. Explicit local-task
+subdirectories must remain under it. Project-linked tasks instead use the
+project's canonical repository directory. New tasks cannot select scratch,
+worktree or branch settings. Claims are serialized across boards when directory
+paths are equal or overlap, and ownership is released only when the earlier run
+ends. The dashboard displays the effective local folder or canonical project path.
 
 Existing tasks retain their recorded paths and files. Missing legacy workspaces
 are not silently recreated; unresolved tasks use the persistent folder. Completion,
