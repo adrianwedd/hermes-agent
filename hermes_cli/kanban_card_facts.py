@@ -51,11 +51,17 @@ def card_facts(conn,tasks,config_for,preset_resolver):
         if not t.get('current_run_id'):
             run=conn.execute("SELECT summary,ended_at FROM task_runs WHERE task_id=? AND summary IS NOT NULL ORDER BY id DESC LIMIT 1",(tid,)).fetchone()
             if run and run[0]:progress={'text':text(run[0]),'at':run[1],'basis':'Latest retained run handoff'}
+        resolution = None
+        if status == 'done':
+            terminal = conn.execute("SELECT summary,ended_at FROM task_runs WHERE task_id=? AND outcome='completed' ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+            final_text = t.get('result') or (terminal[0] if terminal else None)
+            resolution = {'text':text(final_text,1200),'at':t.get('completed_at') or (terminal[1] if terminal else None),'basis':'Native final result and completed run'} if final_text else {'text':'Final resolution was not recorded','basis':'Native Done; missing final result'}
+            progress = None
         owner=t.get('assignee')
         if owner not in configs:
             try:configs[owner]=config_for(owner or 'default')
             except Exception:configs[owner]={}
-        result[tid]={'dispatch':dispatch_facts(conn,t),'blocker':blocker,'progress':progress,'delivery':delivery_facts(conn,tid),'heartbeat_at':t.get('last_heartbeat_at'),'model':model_facts(configs[owner],t,preset_resolver)}
+        result[tid]={'dispatch':dispatch_facts(conn,t),'blocker':blocker,'progress':progress,'resolution':resolution,'delivery':delivery_facts(conn,tid),'heartbeat_at':t.get('last_heartbeat_at'),'model':model_facts(configs[owner],t,preset_resolver)}
     return result
 
 def native_config_for(profile):

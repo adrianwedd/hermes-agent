@@ -19,7 +19,7 @@ export interface RecordedRoute {
 }
 export interface RunRouteReceipt {
   run_id: number; agent: string; started_at: number; ended_at?: number | null
-  launch: RecordedRoute | null; last_observed: RecordedRoute | null; basis: string
+  accounted?: RecordedRoute | null; launch: RecordedRoute | null; last_observed: RecordedRoute | null; basis: string
 }
 
 export interface DeliveryReceipt {
@@ -37,6 +37,7 @@ export interface KanbanCardFacts {
   run_routes?: { selected: RunRouteReceipt | null; history: RunRouteReceipt[]; planned_agent: string; historical_inference: false }
   tokens?: { current: null | RecordedTokenUsage; cumulative: null | RecordedTokenUsage; coverage: string }
   blocker: null | { label: string; detail: string }
+  resolution?: null | { text: string; at?: null | number; basis: string }
   progress: null | { text: string; at?: null | number; basis: string }
   heartbeat_at?: null | number
   model: { primary: string; advisers: string[]; basis: string }

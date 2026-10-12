@@ -1117,7 +1117,7 @@ export function TaskDrawer({
                     </Section>
                   )}
 
-                  {task.latest_summary && !isAdminSummary(task.latest_summary) && (
+                  {task.status !== 'done' && task.latest_summary && !isAdminSummary(task.latest_summary) && (
                     <Section label={k.latestSummary}>
                       <TaskMarkdown text={task.latest_summary} />
                     </Section>

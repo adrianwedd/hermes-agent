@@ -256,6 +256,9 @@ class _KanbanDispatcher:
                 slug = boards[index]
                 self._preparation_board_cursor = index + 1
                 with _kbc().connect_closing(board=slug) as conn:
+                    from hermes_cli.kanban_reassessment import prepare_tick as reassess_tick
+                    if reassess_tick(conn):
+                        return 1
                     result = prepare_tick(conn)
                 if result["prepared"]:
                     logger.info("kanban preparation [%s]: qualified existing TODO %s", slug,

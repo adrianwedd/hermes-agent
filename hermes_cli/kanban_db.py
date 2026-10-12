@@ -4139,6 +4139,8 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     _ctx_header(lines, task)
     from hermes_cli.kanban_completion_workflow import append_completion_context
     append_completion_context(lines, conn, task_id)
+    from hermes_cli.kanban_reassessment import append_context as append_reassessment_context
+    append_reassessment_context(lines, conn, task_id)
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)

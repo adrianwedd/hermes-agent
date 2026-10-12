@@ -19,6 +19,16 @@ def preparation_reason(conn, task_id):
         return 'Preparation required: declare the original-scope completion contract'
     if contract.get('qualified_for_dispatch') is not True:
         return 'Preparation required: operator qualification of original scope and acceptance'
+    reassessment = contract.get('reassessment', {})
+    if isinstance(reassessment, dict) and reassessment.get('state') == 'consumed':
+        from hermes_cli.kanban_reassessment import protected
+        stop = protected(conn, task_id)
+        if stop:
+            return 'Resolution stopped: ' + stop
+        if row[1] != 'review':
+            previous = reassessment.get('previous_max_run_id')
+            if type(previous) is not int or conn.execute('SELECT 1 FROM task_runs WHERE task_id=? AND id>? LIMIT 1', (task_id, previous)).fetchone():
+                return 'Resolution attempt consumed: new retained input or explicit next-phase qualification required'
     path = row[0]
     if not path or not Path(path).is_dir():
         return 'Preparation required: resolve the owned source or evidence workspace'

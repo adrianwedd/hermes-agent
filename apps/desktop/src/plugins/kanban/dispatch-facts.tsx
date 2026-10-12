@@ -3,6 +3,7 @@ import type { KanbanTask } from './types'
 
 export function DispatchFacts({ task }: { task: KanbanTask }) {
   const k = useKanban().dispatch
+  if (task.status === 'done' || task.status === 'archived') return null
   const fact = task.card_facts?.dispatch
   const label = fact?.label ?? (task.dispatch_eligible === false ? k.held : task.dispatch_eligible === true ? k.enabled : k.unavailable)
   const reason = fact?.reason ?? (task.dispatch_eligible === false ? k.disabledReason : task.dispatch_eligible === true ? k.enabledReason : k.missingReason)

@@ -7,7 +7,7 @@ def dispatch_facts(conn, task):
     tid=task['id'];status=task['status'];eligible=task.get('dispatch_eligible')
     fact={'eligible':eligible,'label':'Dispatch state unavailable','reason':'Backend did not serialize dispatch eligibility','owner':None,'next_action':None,'basis':'Native task row'}
     if status in ('done','archived'):
-        fact.update(label='Not queued',reason='Native status is '+status);return fact
+        fact.update(eligible=False,label='Completed' if status=='done' else 'Archived',reason='Final resolution and retained evidence are available' if status=='done' else 'Native archived task');return fact
     if task.get('current_run_id') or task.get('claim_lock') or task.get('worker_pid'):
         fact.update(label='Active owner',reason='Native run or claim is held',owner=task.get('assignee'),next_action='Wait for the current owner’s handoff');return fact
     event=conn.execute("SELECT id,payload FROM task_events WHERE task_id=? AND kind='administrative_pending' ORDER BY id DESC LIMIT 1",(tid,)).fetchone()
