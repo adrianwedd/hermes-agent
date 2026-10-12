@@ -59,15 +59,115 @@ def test_legacy_workspace_preserved_and_new_tasks_cannot_escape(local_board, tmp
     assert kbw.resolve_workspace(kb.get_task(conn, child_tid)) == child
 
 
-def test_decomposition_does_not_inherit_legacy_worktree(local_board):
+def test_decomposition_places_legacy_nonproject_child_in_local_root(local_board, tmp_path):
     from hermes_cli.kanban_db_graph import decompose_triage_task
     conn, root = local_board
     tid = kb.create_task(conn, title="split work", triage=True)
-    conn.execute("UPDATE tasks SET workspace_kind='worktree', workspace_path='/old/repo' WHERE id=?", (tid,))
+    legacy = tmp_path / "canonical" / ".worktrees" / tid
+    legacy.mkdir(parents=True)
+    conn.execute(
+        "UPDATE tasks SET workspace_kind='worktree', workspace_path=? WHERE id=?",
+        (str(legacy), tid),
+    )
     children = decompose_triage_task(conn, tid, root_assignee="default", children=[{"title": "local child", "assignee": "default"}])
     assert children
     task = kb.get_task(conn, children[0])
-    assert (task.workspace_kind, task.workspace_path, task.project_id) == ("dir", "/old/repo", None)
+    assert (task.workspace_kind, task.workspace_path, task.project_id) == ("dir", str(root), None)
+
+
+def test_decomposition_rejects_outside_directory_override_atomically(local_board, tmp_path):
+    from hermes_cli.kanban_db_graph import decompose_triage_task
+
+    conn, _root = local_board
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    tid = kb.create_task(conn, title="split work", triage=True)
+
+    with pytest.raises(ValueError, match="ordinary directory under"):
+        decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="default",
+            children=[
+                {"title": "valid child"},
+                {"title": "escaped child", "workspace_path": str(outside)},
+            ],
+        )
+
+    assert kb.get_task(conn, tid).status == "triage"
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='decomposed'", (tid,),
+    ).fetchone()[0] == 0
+
+
+def test_decomposition_preserves_project_and_enforces_canonical_path(local_board, tmp_path):
+    from hermes_cli import projects_db as pdb
+    from hermes_cli.kanban_db_graph import decompose_triage_task
+
+    conn, _root = local_board
+    repo = tmp_path / "canonical-repo"
+    repo.mkdir()
+    outside = tmp_path / "other-repo"
+    outside.mkdir()
+    with pdb.connect_closing() as pconn:
+        project_id = pdb.create_project(pconn, name="Decomposed", primary_path=str(repo))
+    tid = kb.create_task(conn, title="project split", project_id=project_id, triage=True)
+
+    with pytest.raises(ValueError, match="project's canonical repository"):
+        decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="default",
+            children=[{"title": "wrong checkout", "workspace_path": str(outside)}],
+        )
+
+    children = decompose_triage_task(
+        conn,
+        tid,
+        root_assignee="default",
+        children=[{"title": "canonical child"}],
+    )
+    assert children
+    child = kb.get_task(conn, children[0])
+    assert (child.workspace_kind, child.workspace_path, child.project_id) == (
+        "dir", str(repo), project_id,
+    )
+
+
+def test_decomposition_moves_legacy_project_child_to_canonical_repo(
+    local_board, tmp_path, monkeypatch,
+):
+    from hermes_cli import projects_db as pdb
+    from hermes_cli.kanban_db_graph import decompose_triage_task
+
+    conn, _root = local_board
+    repo = tmp_path / "canonical-repo"
+    repo.mkdir()
+    with pdb.connect_closing() as pconn:
+        project_id = pdb.create_project(pconn, name="Legacy project", primary_path=str(repo))
+    tid = kb.create_task(conn, title="legacy project split", project_id=project_id, triage=True)
+    legacy = repo / ".worktrees" / tid
+    legacy.mkdir(parents=True)
+    conn.execute(
+        "UPDATE tasks SET workspace_kind='worktree', workspace_path=? WHERE id=?",
+        (str(legacy), tid),
+    )
+    worker_home = tmp_path / "worker-profile"
+    worker_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(worker_home))
+
+    children = decompose_triage_task(
+        conn,
+        tid,
+        root_assignee="default",
+        children=[{"title": "canonical project child"}],
+    )
+    assert children
+    child = kb.get_task(conn, children[0])
+    assert (child.workspace_kind, child.workspace_path, child.project_id) == (
+        "dir", str(repo), project_id,
+    )
 
 
 def test_project_task_uses_canonical_checkout_and_claims_serialize(local_board, tmp_path):

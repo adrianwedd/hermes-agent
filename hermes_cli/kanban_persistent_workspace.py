@@ -63,6 +63,40 @@ def creation_defaults(kind, path, project_id, source_task_id, branch_name, board
     return "dir", persistent, "", None
 
 
+def resolve_new_task_workspace(
+    conn, workspace_kind, workspace_path, project_id, project_source_task_id,
+    branch_name, board,
+):
+    """Resolve and validate the workspace persisted for a newly inserted task.
+
+    This performs no writes and opens no Kanban transaction, so atomic graph
+    builders can use the same canonical-project and local-directory policy as
+    ordinary creation inside their one outer transaction.
+    """
+    from hermes_cli import kanban_db as kb
+
+    workspace_kind, workspace_path, project_id, project_source_task_id = creation_defaults(
+        workspace_kind, workspace_path, project_id, project_source_task_id, branch_name, board,
+    )
+    if workspace_kind not in kb.VALID_WORKSPACE_KINDS:
+        raise ValueError(
+            f"workspace_kind must be one of {sorted(kb.VALID_WORKSPACE_KINDS)}, "
+            f"got {workspace_kind!r}"
+        )
+    workspace_path = kb._normalize_workspace_path(workspace_path)
+    if branch_name is not None:
+        branch_name = str(branch_name).strip() or None
+    if branch_name and workspace_kind != "worktree":
+        raise ValueError("branch_name is only valid for worktree workspaces")
+    project_id, project_obj, project_repo, workspace_kind = kb._resolve_project_link(
+        conn, project_id, project_source_task_id, workspace_kind, workspace_path,
+    )
+    if workspace_kind == "dir" and project_repo is not None:
+        workspace_path = project_repo
+    kb._validate_workspace_pair(workspace_kind, workspace_path)
+    return workspace_kind, workspace_path, branch_name, project_id, project_obj, project_repo
+
+
 def execution_workspace(task) -> Path | None:
     """Preserve legacy work in place without creating scratch dirs or worktrees."""
     root = persistent_root()

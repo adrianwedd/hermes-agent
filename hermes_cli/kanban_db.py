@@ -1234,10 +1234,10 @@ def _validate_workspace_pair(workspace_kind: str, workspace_path: Optional[str])
     change where a worker operates and what gets cleaned up. Callers that want
     an ephemeral workspace must say ``scratch``.
 
-    This is deliberately here, in the DB layer, rather than at each caller:
-    every supported write path (CLI ``kanban create``, the ``kanban_create``
-    tool, the dashboard ``POST /tasks``, decomposition fan-out) funnels through
-    ``create_task``, and requeue/reclaim paths never rewrite the pair. The
+    This is deliberately here, in the DB layer, rather than at each surface:
+    ordinary creation and persistent-policy decomposition share the resolver in
+    ``kanban_persistent_workspace``, while legacy decomposition applies the same
+    pair invariant directly. Requeue/reclaim paths never rewrite the pair. The
     dispatcher's ``resolve_workspace`` refusal stays as the fail-safe for rows
     that predate this check; it is no longer the only place the pair is judged.
     """
@@ -1313,26 +1313,34 @@ def _resolve_project_link(
 def _project_from_source_task(
     conn: sqlite3.Connection, _pdb: Any, project_id: str, source_task_id: str,
 ) -> tuple[Any, Optional[str]]:
-    """Recover a Project (and its repo) from a canonical project-linked
-    worktree task on this board. Worker profiles have their own projects.db
-    while the Kanban DB is shared, so this carries the repo + branch
-    convention forward without opening the creator's store and without
-    reusing the source task's literal worktree path. ``(None, None)`` when
-    the source task is not a ``<repo>/.worktrees/<id>`` project worktree."""
+    """Recover a Project and canonical repo from a project-linked source task.
+
+    Worker profiles have their own projects.db while the Kanban DB is shared.
+    A persistent-policy ``dir`` row already stores the canonical checkout; a
+    legacy worktree row carries it in ``<repo>/.worktrees/<id>``. In both cases
+    the new task is resolved to the repository, never the source's secondary
+    worktree path.
+    """
     source_task = get_task(conn, source_task_id)
     if not (
         source_task is not None
         and source_task.project_id == project_id
-        and source_task.workspace_kind == "worktree"
         and source_task.workspace_path
     ):
         return None, None
     source_path = Path(source_task.workspace_path)
-    if not (
-        source_path.is_absolute()
+    if not source_path.is_absolute():
+        return None, None
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    if source_task.workspace_kind == "dir" and persistent_root() is not None:
+        project_repo = str(source_path.resolve())
+    elif (
+        source_task.workspace_kind == "worktree"
         and source_path.name == source_task.id
         and source_path.parent.name == ".worktrees"
     ):
+        project_repo = str(source_path.parent.parent)
+    else:
         return None, None
     project_slug = None
     if source_task.branch_name:
@@ -1345,7 +1353,6 @@ def _project_from_source_task(
             project_slug = _pdb.normalize_slug(project_id)
     if not project_slug:
         return None, None
-    project_repo = str(source_path.parent.parent)
     project_obj = _pdb.Project(
         id=project_id, slug=project_slug, name=project_slug, created_at=0, primary_path=project_repo,
     )
@@ -1433,30 +1440,13 @@ def create_task(
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
         raise ValueError(f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}")
-    from hermes_cli.kanban_persistent_workspace import creation_defaults
-    workspace_kind, workspace_path, project_id, project_source_task_id = creation_defaults(
-        workspace_kind, workspace_path, project_id, project_source_task_id, branch_name, board,
+    from hermes_cli.kanban_persistent_workspace import resolve_new_task_workspace
+    (
+        workspace_kind, workspace_path, branch_name, project_id, project_obj, project_repo,
+    ) = resolve_new_task_workspace(
+        conn, workspace_kind, workspace_path, project_id, project_source_task_id,
+        branch_name, board,
     )
-    if workspace_kind not in VALID_WORKSPACE_KINDS:
-        raise ValueError(
-            f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
-            f"got {workspace_kind!r}"
-        )
-    workspace_path = _normalize_workspace_path(workspace_path)
-    if branch_name is not None:
-        branch_name = str(branch_name).strip() or None
-    if branch_name and workspace_kind != "worktree":
-        raise ValueError("branch_name is only valid for worktree workspaces")
-
-    project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
-        conn, project_id, project_source_task_id, workspace_kind, workspace_path
-    )
-    if workspace_kind == "dir" and project_repo is not None:
-        workspace_path = project_repo
-    # Invariant check AFTER the project link resolves: a scratch request on a
-    # project-scoped board is upgraded to a worktree there, and its path is
-    # materialised below, so the pair that gets persisted is what must hold.
-    _validate_workspace_pair(workspace_kind, workspace_path)
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
