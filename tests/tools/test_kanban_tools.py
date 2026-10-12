@@ -771,6 +771,49 @@ def test_create_explicit_scratch_ignores_ambient_board_project(
     assert create() == (("worktree", project_id) if target_scoped else ("scratch", None))
 
 
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_create_dir_without_path_is_a_structured_error(worker_env, blank, monkeypatch, tmp_path):
+    """The workspace invariant reaches the agent tool surface too.
+
+    ``kanban_create`` is how an orchestrator worker fans out, so a ``dir``
+    request with no path must come back as a structured tool error naming the
+    requirement — not a traceback, and above all not a persisted invalid row.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    args = {"title": "dir without path", "assignee": "peer", "workspace_kind": "dir"}
+    if blank is not None:
+        args["workspace_path"] = blank
+    out = json.loads(kt._handle_create(args))
+    assert out.get("error"), out
+    assert "requires an absolute workspace_path" in out["error"]
+
+    with kbc.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE title = 'dir without path'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE workspace_kind = 'dir' "
+            "AND (workspace_path IS NULL OR trim(workspace_path) = '')"
+        ).fetchone()[0] == 0
+
+
+def test_create_dir_with_path_still_ok(worker_env, tmp_path):
+    """Positive control on the same surface: a named directory still creates."""
+    from tools import kanban_tools as kt
+
+    shared = tmp_path / "shared-directory"
+    shared.mkdir()
+    out = json.loads(kt._handle_create({
+        "title": "dir with path", "assignee": "peer",
+        "workspace_kind": "dir", "workspace_path": str(shared),
+    }))
+    assert out.get("ok") is True, out
+    assert out["workspace_kind"] == "dir"
+
+
 def test_link_running_child_allows_owner_but_rejects_foreign(monkeypatch, worker_env):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc

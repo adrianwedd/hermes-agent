@@ -267,6 +267,18 @@ def _relocate_imported_rows(conn: sqlite3.Connection, slug: str) -> tuple[dict[s
             ).fetchall()
         ]
         conn.execute("UPDATE tasks SET workspace_path = NULL, branch_name = NULL")
+        # NOTE (recorded, deliberately NOT repaired here): the blanket clear
+        # above is pre-existing behaviour and it *mints* the invalid pair for
+        # every imported ``dir`` row that arrived carrying a path — the path is
+        # cleared, the kind stays ``dir``, and the row sits in triage until a
+        # human re-points it. Demoting those rows to ``scratch`` would fix the
+        # pair by mass-converting *valid* shared-directory workspaces into
+        # disposable ones, which this card's "avoid collateral semantics"
+        # clause forbids, and clearing the foreign path in the first place is
+        # the older, intentional protection against dispatching paths that
+        # belong to the exporting machine. The correct resolution is an
+        # explicit import mapping policy for foreign ``dir`` paths, which is an
+        # operator decision, not a side effect of an invariant patch.
         if parked:
             conn.execute(f"UPDATE tasks SET status = 'triage' WHERE id IN ({_placeholders(parked)})", parked)
             warnings.append(
