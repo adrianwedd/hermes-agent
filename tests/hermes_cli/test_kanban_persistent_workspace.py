@@ -210,6 +210,26 @@ def test_dispatch_serializes_tasks_sharing_canonical_checkout(local_board, tmp_p
     assert kb.get_task(conn, second).status == "ready"
 
 
+def test_dispatch_preview_reports_workspace_owner_instead_of_spawn(local_board, tmp_path):
+    from hermes_cli import kanban_db_dispatch as kbd
+    from hermes_cli import projects_db as pdb
+
+    conn, _root = local_board
+    repo = tmp_path / "preview-canonical-repo"
+    repo.mkdir()
+    with pdb.connect_closing() as pconn:
+        project_id = pdb.create_project(pconn, name="Preview", primary_path=str(repo))
+    first = kb.create_task(conn, title="claimed owner", assignee="default", project_id=project_id)
+    second = kb.create_task(conn, title="waiting writer", assignee="default", project_id=project_id)
+    assert kb.claim_task(conn, first) is not None
+
+    result = kbd.dispatch_once(conn, dry_run=True, max_spawn=2)
+
+    assert result.spawned == []
+    assert (second, "workspace_owner_conflict") in result.respawn_guarded
+    assert kb.get_task(conn, second).status == "ready"
+
+
 def test_cross_board_overlapping_workspace_is_owned_for_full_claim_lifetime(local_board):
     conn, root = local_board
     nested = root / "nested"
