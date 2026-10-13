@@ -10,7 +10,6 @@ Inspired by OpenAI Codex's Smart Approvals guardian subagent.
 
 import logging
 import asyncio
-import contextvars
 import threading
 import time
 from tools import approval_context as _ctx
@@ -47,19 +46,21 @@ def _call_guardian(call, **kwargs):
         asyncio.get_running_loop()
     except RuntimeError:
         return call(**kwargs)
-    context = contextvars.copy_context()
+    from agent.memory_provider import spawn_context_thread
+
     done = threading.Event()
     outcome = {}
 
     def run():
         try:
-            outcome["result"] = context.run(call, **kwargs)
+            outcome["result"] = call(**kwargs)
         except BaseException as exc:
+            logger.exception("Smart approval guardian thread failed")
             outcome["error"] = exc
         finally:
             done.set()
 
-    threading.Thread(target=run, name="smart-approval-guardian", daemon=True).start()
+    spawn_context_thread(run, name="smart-approval-guardian").start()
     done.wait()
     if "error" in outcome:
         raise outcome["error"]
