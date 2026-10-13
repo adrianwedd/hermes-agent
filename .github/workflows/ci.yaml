@@ -128,10 +128,9 @@ jobs:
       e2e: ${{ needs.detect.outputs.e2e == 'true' }}
       e2e_upgrade: ${{ needs.detect.outputs.e2e_upgrade == 'true' }}
 
-  # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
-  # the OS-marked tests it collects are skipped there by design (see the
-  # `_OS_MARKS` comment in tests/conftest.py) — this is where they run.
-  # Same `python` lane gate: if no Python changed, neither runs.
+  # Windows-only lanes. The main `tests` lane above is Linux-only; macOS-marked
+  # tests run locally on Studio rather than on hosted CI runners.
+  # Same `python` lane gate: if no Python changed, Windows tests do not run.
   tests-os:
     name: OS-specific tests
     needs: detect
