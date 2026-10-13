@@ -2021,16 +2021,14 @@ def _summarize_refused_tool_result(tool_name: str, args: dict, content: str) -> 
     drop the "do not retry" instruction. Strictly below _PRUNE_MIN_CHARS, like the clarify summary,
     so later prune passes keep it."""
     payload = _json_dict(content)
-    status = payload.get("status")
+    status = "approval_error" if payload.get("approval_error") is True else payload.get("status")
     error = payload.get("error") if isinstance(payload.get("error"), str) else ""
     if not error and content.lstrip().startswith("BLOCKED"):
         error = content.strip()
     if status == "pending_approval":
         outcome = "awaiting the user's approval, not run"
-    elif status == "approval_error" or payload.get("approval_error") is True:
-        outcome = "approval engine failed, not run; diagnose before retrying"
-    elif error and (status == "blocked" or error.lstrip().startswith("BLOCKED")):
-        outcome = "BLOCKED, not run"
+    elif status == "approval_error" or (error and (status == "blocked" or error.lstrip().startswith("BLOCKED"))):
+        outcome = "approval engine failed, not run; diagnose before retrying" if status == "approval_error" else "BLOCKED, not run"
         if "NOT consented" in error:
             outcome += "; the user did NOT consent, do not retry or reach the same outcome another way"
     else:
