@@ -2087,7 +2087,7 @@ def _dispatch_lane_task(
             per_profile_running[name] = per_profile_running.get(name, 0) + 1
 
     if dry_run:
-        if preview_workspace_conflict(conn, task_id):
+        if preview_workspace_conflict(conn, task_id, result.spawned):
             result.respawn_guarded.append((task_id, "workspace_owner_conflict"))
             return False
         result.spawned.append((task_id, assignee, ""))
