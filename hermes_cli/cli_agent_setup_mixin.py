@@ -5,6 +5,7 @@ imported lazily inside each method (import cycle)."""
 from __future__ import annotations
 
 import sys
+import os
 
 from rich.markup import escape as _escape
 
@@ -699,6 +700,16 @@ class CLIAgentSetupMixin:
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
                 notice_callback=self._on_notice, notice_clear_callback=self._on_notice_clear,
                 reaction_callback=self._on_reaction)
+            if single_query_mode and os.environ.get("HERMES_KANBAN_TASK"):
+                # The worker PID was adopted before agent construction. Link the
+                # freshly allocated session to that exact live claim now, before
+                # its first model call or a possible interrupted handoff.
+                try:
+                    from hermes_cli.kanban_worker_observability import register_from_agent
+                    if not register_from_agent(self.agent):
+                        logger.warning("Kanban worker session registration was refused for the current claim")
+                except Exception:  # health: allow BLE001 -- optional receipt failure must not abort the worker; log traceback
+                    logger.exception("Kanban worker session registration failed")
             # Reference for atexit memory-provider shutdown: ``_run_cleanup`` in cli.py
             # reads ``cli._active_agent_ref``, so this MUST write the ``cli`` module's
             # global — a ``global`` statement here would bind this module's namespace.

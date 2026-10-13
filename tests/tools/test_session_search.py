@@ -197,6 +197,9 @@ class TestBrowseShape:
                                "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
             conn.execute("INSERT INTO task_runs VALUES (1, 'task-a', ?)",
                          (json.dumps({"worker_session_id": "legacy_a"}),))
+            conn.execute("INSERT INTO task_runs VALUES (2, 'task-a', '{}')")
+            conn.execute("INSERT INTO task_events VALUES (2, 'task-a', 'worker_session_registered', ?)",
+                         (json.dumps({"worker_session_id": "legacy_event"}),))
         monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
         monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
         monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
@@ -205,6 +208,8 @@ class TestBrowseShape:
             db.append_message(sid, role="assistant", content=f"unique worktoken {sid}")
         db.create_session("legacy_a", source="kanban")
         db.append_message("legacy_a", role="assistant", content="unique worktoken legacy_a")
+        db.create_session("legacy_event", source="kanban")
+        db.append_message("legacy_event", role="assistant", content="unique worktoken legacy_event")
         db.create_session("unknown", source="kanban")
         db.append_message("unknown", role="assistant", content="unique worktoken unknown")
         db.create_session("ordinary", source="cli")
@@ -213,14 +218,17 @@ class TestBrowseShape:
         db.append_message("foreign_child", role="assistant", content="unique worktoken foreign_child")
 
         sql_hits = db.search_messages(query="worktoken", limit=100,
-                                      kanban_scope=("board-a", json.dumps(["legacy_a"])))
-        assert {hit["session_id"] for hit in sql_hits} == {"same_a", "legacy_a", "ordinary"}
+                                      kanban_scope=("board-a", json.dumps(["legacy_a", "legacy_event"])))
+        assert {hit["session_id"] for hit in sql_hits} == {
+            "same_a", "legacy_a", "legacy_event", "ordinary"}
 
         found = json.loads(session_search(query="worktoken", db=db, limit=10))
-        assert {r["session_id"] for r in found["results"]} == {"same_a", "legacy_a", "ordinary"}
+        assert {r["session_id"] for r in found["results"]} == {
+            "same_a", "legacy_a", "legacy_event", "ordinary"}
         browsed = json.loads(session_search(db=db, limit=10))
-        assert {r["session_id"] for r in browsed["results"]} == {"same_a", "legacy_a", "ordinary"}
-        for sid in ("same_a", "legacy_a", "ordinary"):
+        assert {r["session_id"] for r in browsed["results"]} == {
+            "same_a", "legacy_a", "legacy_event", "ordinary"}
+        for sid in ("same_a", "legacy_a", "legacy_event", "ordinary"):
             assert json.loads(session_search(db=db, session_id=sid))["success"] is True
         for sid in ("other_b", "unknown", "foreign_child"):
             read = json.loads(session_search(db=db, session_id=sid))
