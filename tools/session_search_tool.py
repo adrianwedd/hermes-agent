@@ -529,11 +529,26 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
     # A single SQL LIMIT can be filled entirely by repetitive worker/cron rows.
     # Reserve the interactive scan before filling from demoted sources, so source
     # priority holds even when more than _DISCOVER_SCAN_LIMIT automation rows match.
-    interactive, err = _loud(lambda: db.search_messages(
-        exclude_sources=list(hidden + _DEMOTED_SESSION_SOURCES), **search_args),
-        "FTS5 interactive search failed: %s", "Search failed")
-    if err:
-        return err
+    interactive = []
+    interactive_roots: set[str] = set()
+    interactive_scan_limited = False
+    for page in range(20):
+        # A non-Kanban descendant of a foreign-board worker passes the SQL
+        # source predicate, then fails the lineage scope check. Keep paging
+        # until enough eligible roots survive that check.
+        page_rows, err = _loud(lambda: db.search_messages(
+            exclude_sources=list(hidden + _DEMOTED_SESSION_SOURCES),
+            **{**search_args, "offset": page * _DISCOVER_SCAN_LIMIT}),
+            "FTS5 interactive search failed: %s", "Search failed")
+        if err:
+            return err
+        interactive.extend(page_rows)
+        interactive_roots.update(root for r in page_rows if (root := _eligible_discovery_root(
+            db, r, current_session_id, current_lineage_root, excluded_roots, kanban_scope)))
+        if len(page_rows) < _DISCOVER_SCAN_LIMIT or len(interactive_roots) >= limit:
+            break
+    else:
+        interactive_scan_limited = True
     demoted_sources = [source for source in _DEMOTED_SESSION_SOURCES if source not in hidden]
     demoted = []
     demoted_scan_limited = False
@@ -591,6 +606,7 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
     for entry in results:
         entry["link"] = _session_link(entry["session_id"], link_profile)
     return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions),
+                             **({"interactive_scan_limited": True} if interactive_scan_limited else {}),
                              **({"demoted_scan_limited": True} if demoted_scan_limited else {}), link_hint=(
         "When referring the user to a session, write its `link` value "
         "verbatim inline mid-sentence (it renders as a titled link) — never "

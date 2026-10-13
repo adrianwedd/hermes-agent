@@ -190,6 +190,15 @@ class TestBrowseShape:
         flooded = json.loads(session_search(query="floodtoken", db=db, limit=1, sort="newest"))
         assert [r["session_id"] for r in flooded["results"]] == ["same_a"]
 
+        # A non-Kanban descendant of another board is rejected by lineage,
+        # but must not hide an eligible interactive hit behind the first page.
+        db.append_message("ordinary", role="assistant", content="childfloodtoken eligible")
+        for index in range(301):
+            db.append_message("foreign_child", role="assistant",
+                              content=f"childfloodtoken foreign-board {index}")
+        child_flood = json.loads(session_search(query="childfloodtoken", db=db, limit=1, sort="newest"))
+        assert [r["session_id"] for r in child_flood["results"]] == ["ordinary"]
+
     def test_browse_uses_bounded_recent_path(self):
         class _DB:
             rich_called = False
