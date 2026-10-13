@@ -89,10 +89,6 @@ def register_from_agent(agent):
                     {"worker_session_id": session_id,
                      "launch_route": registered.get("launch_route")}, run_id=run_id,
                 )
-        kb.notify_task_updated(
-            task_id, reason="worker_session_registered",
-            board=os.environ.get("HERMES_KANBAN_BOARD"),
-        )
     return True
 
 

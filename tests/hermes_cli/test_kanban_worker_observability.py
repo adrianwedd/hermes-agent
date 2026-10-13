@@ -25,7 +25,6 @@ def test_startup_receipt_is_exact_and_idempotent(tmp_path, monkeypatch):
 
     class Board:
         write_txn = staticmethod(lambda _conn: nullcontext())
-        notify_task_updated = staticmethod(lambda *_args, **_kwargs: None)
 
         @staticmethod
         def _append_event(_conn, task_id, kind, payload, run_id):
