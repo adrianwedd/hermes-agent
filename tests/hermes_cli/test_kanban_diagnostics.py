@@ -159,6 +159,23 @@ def test_review_event_without_run_resets_only_prior_crashes():
     assert "repeated_crashes" in {d.kind for d in protocol}
 
 
+def test_review_boundary_uses_event_id_after_clock_step_back():
+    """The single-card CLI lists by timestamp, not necessarily insertion order."""
+    inserted = [
+        {**_event("crashed", ts=100), "id": 1},
+        {**_event("crashed", ts=101), "id": 2},
+        {**_event("review_requested", ts=200), "id": 3},
+        {**_event("crashed", ts=199), "id": 4},
+        {**_event("crashed", ts=199), "id": 5},
+    ]
+    cli_order = sorted(inserted, key=lambda event: (event["created_at"], event["id"]))
+    runs = [_run("crashed", run_id=run_id) for run_id in range(1, 5)]
+    diags = kd.compute_task_diagnostics(_task(status="ready"), cli_order, runs)
+    crashes = [diag for diag in diags if diag.kind == "repeated_crashes"]
+    assert len(crashes) == 1
+    assert crashes[0].data["consecutive_crashes"] == 2
+
+
 
 
 

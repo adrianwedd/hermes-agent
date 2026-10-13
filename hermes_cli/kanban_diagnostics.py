@@ -484,7 +484,15 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
     # transition. Count only crashes after that handoff; older run outcomes are
     # historical even when no review_requested run exists.
     crashes_since_review = 0
-    for event in reversed(events):
+    # list_events orders by second-resolution wall time, which can move
+    # backwards. Event ids are the durable insertion order; fixture events
+    # without ids retain their caller-provided order.
+    ordered_events = (
+        sorted(events, key=lambda event: int(_task_field(event, "id")))
+        if events and all(_task_field(event, "id") is not None for event in events)
+        else events
+    )
+    for event in reversed(ordered_events):
         kind = _event_kind(event)
         if kind == "review_requested":
             consecutive = min(consecutive, crashes_since_review)
