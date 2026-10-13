@@ -10,6 +10,35 @@ from hermes_cli import kanban_worker_observability as observability
 from tools import kanban_tools
 
 
+def test_startup_receipt_uses_native_board_transaction(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "implementer")
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_dispatch as dispatch
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="receipt test", assignee="implementer")
+        kb.claim_task(conn, task_id)
+        run_id = kb._current_run_id(conn, task_id)
+        claim_lock = kb.get_task(conn, task_id).claim_lock
+        assert dispatch.adopt_worker_pid(conn, task_id, run_id, os.getpid()) is True
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", claim_lock)
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "default")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(kb.kanban_db_path()))
+
+    agent = SimpleNamespace(session_id="native-session", provider="local", model="model-a")
+    assert observability.register_from_agent(agent) is True
+    with kbc.connect_closing() as conn:
+        assert observability.registered_receipt(conn, task_id, run_id)["worker_session_id"] == "native-session"
+
+
 def test_startup_receipt_is_exact_and_idempotent(tmp_path, monkeypatch):
     conn = sqlite3.connect(tmp_path / "board.db")
     conn.executescript(
