@@ -108,6 +108,66 @@ def _worker_kanban_scope() -> Optional[tuple[str, str]]:
     return board, json.dumps(sorted(ids))
 
 
+def _compression_edge(parent: dict, child: dict) -> bool:
+    """Only a real compression continuation may borrow a run receipt."""
+    if parent.get("end_reason") != "compression" or parent.get("source") != "kanban" or child.get("source") != "kanban":
+        return False
+    config = child.get("model_config") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except ValueError:
+            return False
+    return isinstance(config, dict) and not (config.get("_delegate_from") or config.get("_branched_from"))
+
+
+def _unique_compression_child(db, parent_id: str, parent: dict) -> Optional[str]:
+    """Ambiguous legacy siblings cannot inherit each other's board receipt."""
+    children = _quiet(lambda: db._read_all(
+        "SELECT id FROM sessions WHERE parent_session_id = ?", (parent_id,)), [],
+        "compression children lookup failed for %s", parent_id)
+    valid = [row["id"] for row in children if _compression_edge(parent, _get_session_meta(db, row["id"]))]
+    return valid[0] if len(valid) == 1 else None
+
+
+def _expand_legacy_lineages(db, scope: Optional[tuple[str, str]]) -> Optional[tuple[str, str]]:
+    """Extend exact board receipts across compression edges, never branch/delegate edges.
+
+    SQL discovery needs these IDs before LIMIT; doing this only during result
+    hydration would leave receipt-backed ancestors hidden behind the search cap.
+    """
+    if scope is None:
+        return None
+    ids = set(json.loads(scope[1]))
+    stamped = _quiet(lambda: db._read_all(
+        "SELECT id FROM sessions WHERE source='kanban' AND "
+        "CASE WHEN json_valid(origin_json) THEN json_extract(origin_json, '$.kanban_board') END = ?",
+        (scope[0],)), [], "board-stamped session lookup failed")
+    ids.update(row["id"] for row in stamped)
+    pending = list(ids)
+    seen: set[str] = set()
+    while pending and len(seen) < 4096:
+        sid = pending.pop()
+        if sid in seen:
+            continue
+        seen.add(sid)
+        meta = _get_session_meta(db, sid)
+        if not meta:
+            continue
+        parent_id = meta.get("parent_session_id")
+        if parent_id:
+            parent = _get_session_meta(db, parent_id)
+            if parent and _unique_compression_child(db, parent_id, parent) == sid and parent_id not in ids:
+                ids.add(parent_id)
+                pending.append(parent_id)
+        if meta.get("end_reason") == "compression":
+            child_id = _unique_compression_child(db, sid, meta)
+            if child_id and child_id not in ids:
+                ids.add(child_id)
+                pending.append(child_id)
+    return scope[0], json.dumps(sorted(ids))
+
+
 def _session_in_scope(db, sid: str, scope: Optional[tuple[str, str]]) -> bool:
     if scope is None:
         return True
@@ -428,6 +488,24 @@ def _hydrate_hit(db, lineage_root: str, match_info: Dict[str, Any], result_detai
         detail=result_detail)
 
 
+def _eligible_discovery_root(db, hit: dict, current_session_id: Optional[str],
+                             current_lineage_root: Optional[str], excluded_roots: set[str], scope) -> Optional[str]:
+    """One eligibility rule for pagination and final hydration."""
+    raw_sid = hit["session_id"]
+    root = _resolve_lineage(db, raw_sid)
+    if not _session_in_scope(db, raw_sid, scope) or raw_sid in excluded_roots or root in excluded_roots:
+        return None
+    # Compacted/rotated/reset history left live context; an active current
+    # session or delegation child has not and must not fill the result budget.
+    compacted = _is_compacted_message(db, hit.get("id"))
+    if current_lineage_root and root == current_lineage_root and not (
+            _session_left_live_context(db, raw_sid) or compacted):
+        return None
+    if current_session_id and raw_sid == current_session_id and not compacted:
+        return None
+    return root
+
+
 def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort: Optional[str],
               detail: str, current_session_id: str = None, link_profile: str = None,
               after_ts: Optional[int] = None, before_ts: Optional[int] = None,
@@ -473,7 +551,8 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
             if err:
                 return err
             demoted.extend(page_rows)
-            demoted_roots.update(_resolve_lineage(db, r["session_id"]) for r in page_rows)
+            demoted_roots.update(root for r in page_rows if (root := _eligible_discovery_root(
+                db, r, current_session_id, current_lineage_root, excluded_roots, kanban_scope)))
             if len(page_rows) < _DISCOVER_SCAN_LIMIT or len(demoted_roots) >= limit:
                 break
         else:
@@ -497,26 +576,9 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
     for r in raw_results:
         if len(seen_sessions) >= limit:
             break
-        raw_sid, resolved_sid = r["session_id"], _resolve_lineage(db, r["session_id"])
-        if not _session_in_scope(db, raw_sid, kanban_scope):
-            continue
-        if raw_sid in excluded_roots or resolved_sid in excluded_roots:
-            continue
-        # Skip the current session lineage — UNLESS the hit's transcript has left live context. Three
-        # sub-cases: Legacy compression rotation: the FTS hit lives in a session that itself ended with
-        # end_reason='compression'. That session's content has been replaced by a summary in the
-        # continuation child, so it must stay discoverable. /new-reset (and idle/daily/CLI new_session): the
-        # predecessor was ended without carrying any transcript into the child. Same lineage root, but the
-        # prior conversation is NOT in the active context — hiding it made gateway recall go blind after
-        # every /new (#85756). A live delegation child has end_reason=None, so it stays excluded. In-place
-        # compaction: the FTS hit lives on the SAME session_id as the current session, but the matched
-        # message row is an archived (active=0, compacted=1) row. The live-context load filters active=1, so
-        # that content is no longer in context — let it through.
-        is_compacted_hit = _is_compacted_message(db, r.get("id"))
-        if current_lineage_root and resolved_sid == current_lineage_root and not (
-                _session_left_live_context(db, raw_sid) or is_compacted_hit):
-            continue
-        if current_session_id and raw_sid == current_session_id and not is_compacted_hit:
+        resolved_sid = _eligible_discovery_root(
+            db, r, current_session_id, current_lineage_root, excluded_roots, kanban_scope)
+        if resolved_sid is None:
             continue
         seen_sessions.setdefault(resolved_sid, {**r, "_lineage_root": resolved_sid})
     for lineage_root, match_info in seen_sessions.items():
@@ -709,7 +771,7 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
     if profile_db is not None:
         db, current_session_id = profile_db, None
         owned_dbs.append(profile_db)
-    kanban_scope = _worker_kanban_scope()
+    kanban_scope = _expand_legacy_lineages(db, _worker_kanban_scope())
     if isinstance(session_id, str) and session_id.strip():
         if around_message_id is not None:
             return _scroll(db, session_id.strip(), around_message_id, window, current_session_id, kanban_scope)
