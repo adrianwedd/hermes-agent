@@ -375,16 +375,27 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
         title_started = _coerce_started_ts((_get_session_meta(db, title_root) or _get_session_meta(db, title_sid)).get("started_at"))
         if {title_sid, title_root} & excluded_roots or not _in_time_window(title_started, after_ts, before_ts):
             title_result = None
-    raw_results, err = _loud(lambda: db.search_messages(
-        query=query, role_filter=role_filter or ["user", "assistant"],
-        exclude_sources=list(_hidden_sources(link_profile)), limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort,
-        fields=_DISCOVER_SEARCH_FIELDS, after_ts=after_ts, before_ts=before_ts), "FTS5 search failed: %s", "Search failed")
+    hidden = _hidden_sources(link_profile)
+    search_args = dict(query=query, role_filter=role_filter or ["user", "assistant"],
+                       limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort,
+                       fields=_DISCOVER_SEARCH_FIELDS, after_ts=after_ts, before_ts=before_ts)
+    # A single SQL LIMIT can be filled entirely by repetitive worker/cron rows.
+    # Reserve the interactive scan before filling from demoted sources, so source
+    # priority holds even when more than _DISCOVER_SCAN_LIMIT automation rows match.
+    interactive, err = _loud(lambda: db.search_messages(
+        exclude_sources=list(hidden + _DEMOTED_SESSION_SOURCES), **search_args),
+        "FTS5 interactive search failed: %s", "Search failed")
     if err:
         return err
-    # Demote cron rows below interactive ones BEFORE dedup so a high-volume cron corpus
-    # can't starve the user's own sessions out of the top `limit`; stable sort keeps BM25
-    # order within each class.
-    raw_results = sorted(raw_results, key=lambda r: (r.get("source") or "") in _DEMOTED_SESSION_SOURCES)
+    demoted_sources = [source for source in _DEMOTED_SESSION_SOURCES if source not in hidden]
+    demoted = []
+    if demoted_sources:
+        demoted, err = _loud(lambda: db.search_messages(
+            source_filter=demoted_sources, exclude_sources=list(hidden), **search_args),
+            "FTS5 worker search failed: %s", "Search failed")
+        if err:
+            return err
+    raw_results = interactive + demoted
     # See #19434.
     if not raw_results and not title_result:
         return _discover_payload(db, query, detail, [], message=(

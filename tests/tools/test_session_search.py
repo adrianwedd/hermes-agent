@@ -571,6 +571,18 @@ class TestCrossProfileRead:
 # =========================================================================
 
 class TestCronDemotion:
+    def test_worker_flood_cannot_hide_interactive_match_at_scan_boundary(self, db):
+        db.create_session("interactive", source="desktop")
+        db.append_message("interactive", role="assistant", content="orchid delivery status")
+        db.create_session("worker_flood", source="kanban")
+        for i in range(301):
+            db.append_message("worker_flood", role="assistant",
+                              content=f"orchid delivery status worker receipt {i}")
+
+        result = json.loads(session_search(query="orchid delivery status", limit=2,
+                                           sort="newest", db=db))
+        assert [row["session_id"] for row in result["results"]] == ["interactive", "worker_flood"]
+
     def _seed_cron_and_interactive(self, db):
         """One interactive (telegram) session and several cron sessions, all
         matching the same query. Cron rows accumulate repetitive vocabulary
