@@ -84,6 +84,37 @@ class TestSmartApproval:
 
         assert asyncio.run(invoke()) == "approve"
 
+    def test_guardian_failure_is_not_a_denial_or_manual_wait(self, monkeypatch):
+        monkeypatch.setattr(approval_module, "_smart_verdict", lambda *_: "error")
+        result, denied = approval_module._smart_gate(
+            approval_module._COMMAND_GATE, "python -c 'print(1)'", "script execution",
+            "script execution", ["script execution"], "worker", human_present=False,
+        )
+        assert result["status"] == "approval_error"
+        assert result["approved"] is False
+        assert result["approval_error"] is True
+        assert denied is False
+        manual, denied = approval_module._smart_gate(
+            approval_module._COMMAND_GATE, "python -c 'print(1)'", "script execution",
+            "script execution", ["script execution"], "owner", human_present=True,
+        )
+        assert manual is None
+        assert denied is False
+
+    def test_terminal_reports_approval_engine_fault(self, monkeypatch):
+        import json
+        from tools import terminal_tool
+
+        monkeypatch.setattr(terminal_tool, "_check_all_guards", lambda *_a, **_k: {
+            "approved": False, "status": "approval_error", "approval_error": True,
+            "message": "Smart approval engine failed before a decision.",
+        })
+        with pytest.raises(terminal_tool._Rejected) as rejected:
+            terminal_tool._run_approval_guards("python -c 'print(1)'", "local", {}, force=False)
+        result = json.loads(rejected.value.result_json)
+        assert result["status"] == "approval_error"
+        assert result["approval_error"] is True
+
     def test_smart_approval_does_not_allowlist_the_pattern_for_session(self, monkeypatch):
         session_key = "test-smart-per-command"
         command = "python -c \"print('hello')\""

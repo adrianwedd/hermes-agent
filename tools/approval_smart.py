@@ -105,7 +105,7 @@ def _get_smart_policy() -> str:
 
 
 def _smart_approve(command: str, description: str) -> str:
-    """Ask the auxiliary LLM; return 'approve', 'deny', or 'escalate' (uncertain/failed).
+    """Ask the auxiliary LLM; return a verdict or 'error' for engine failure.
 
     Inspired by OpenAI Codex's Smart Approvals guardian subagent (openai/codex#13860).
     """
@@ -154,19 +154,19 @@ def _smart_approve(command: str, description: str) -> str:
             finish_reason = getattr(response.choices[0], "finish_reason", None)
             logger.warning("Smart approvals: guardian returned an empty answer "
                            "(finish_reason=%s), escalating", finish_reason)
-            return "escalate"
+            return "error"
         return _VERDICTS.get(answer, "escalate")
     except Exception as e:
         # WARNING, not DEBUG: a failed/blocked guardian call is a real event
         # the operator needs to see (the hang was invisible at DEBUG).
         logger.warning("Smart approvals: LLM call failed after %.1fs (%s: %s), escalating",
                        time.monotonic() - _smart_t0, type(e).__name__, e)
-        return "escalate"
+        return "error"
 
 
 def _smart_verdict(command: str, description: str, pattern_key: str,
                    pattern_keys: list[str], session_key: str) -> str:
-    """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'.
+    """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate' | 'error'.
     Redaction is observer-payload preparation, not approval policy: if it fails,
     skip observability rather than leak raw data or block the LLM decision."""
     try:
