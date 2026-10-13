@@ -9,6 +9,9 @@ Inspired by OpenAI Codex's Smart Approvals guardian subagent.
 """
 
 import logging
+import asyncio
+import contextvars
+import threading
 import time
 from tools import approval_context as _ctx
 
@@ -31,6 +34,36 @@ _SYSTEM_PROMPT = (
     "Respond with exactly one word: APPROVE, DENY, or ESCALATE"
 )
 _VERDICTS = {"APPROVE": "approve", "DENY": "deny"}
+
+
+def _call_guardian(call, **kwargs):
+    """Keep synchronous Relay's coroutine runner off the caller's event loop.
+
+    Some tool surfaces invoke the synchronous approval gate on an asyncio thread.
+    Relay refuses to run its awaitable there; carry the profile and secret scopes
+    into a worker thread while the existing synchronous gate waits for its result.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return call(**kwargs)
+    context = contextvars.copy_context()
+    done = threading.Event()
+    outcome = {}
+
+    def run():
+        try:
+            outcome["result"] = context.run(call, **kwargs)
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=run, name="smart-approval-guardian", daemon=True).start()
+    done.wait()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
 
 
 def _strip_line_comment(line: str) -> str:
@@ -106,7 +139,7 @@ def _smart_approve(command: str, description: str) -> str:
             'via -c flag" but is completely harmless.\n\n'
             "Respond with exactly one word: APPROVE, DENY, or ESCALATE"
         )
-        response = call_llm(
+        response = _call_guardian(call_llm,
             task="approval", temperature=0, max_tokens=16, timeout=smart_timeout,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
         )

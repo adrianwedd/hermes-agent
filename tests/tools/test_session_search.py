@@ -78,6 +78,30 @@ class TestFormatTimestamp:
 # =========================================================================
 
 class TestBrowseShape:
+    def test_worker_history_is_discoverable_and_expandable(self, db):
+        db.create_session("worker", source="kanban")
+        db.append_message("worker", role="assistant", content="Accepted zephyr result; remaining publication")
+        db.create_session("other", source="subagent")
+        db.append_message("other", role="assistant", content="zephyr private delegation")
+
+        found = json.loads(session_search(query="zephyr", db=db))
+        assert [r["session_id"] for r in found["results"]] == ["worker"]
+        assert found["results"][0]["source"] == "kanban"
+        read = json.loads(session_search(session_id="worker", db=db))
+        assert read["success"] is True
+        assert "remaining publication" in json.dumps(read)
+
+        browsed = json.loads(session_search(db=db, limit=10))
+        assert "worker" in [r["session_id"] for r in browsed["results"]]
+        assert "other" not in [r["session_id"] for r in browsed["results"]]
+
+    def test_named_profile_does_not_discover_worker_history(self, db, monkeypatch):
+        db.create_session("worker", source="kanban")
+        db.append_message("worker", role="assistant", content="zephyr private worker result")
+        monkeypatch.setattr("tools.session_search_tool._resolve_profile_db", lambda _profile: db)
+        found = json.loads(session_search(query="zephyr", db=db, profile="other"))
+        assert found["count"] == 0
+
     def test_browse_uses_bounded_recent_path(self):
         class _DB:
             rich_called = False

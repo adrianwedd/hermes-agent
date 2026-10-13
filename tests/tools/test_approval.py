@@ -1,6 +1,8 @@
 """Tests for the dangerous command approval module."""
 
 import os
+import asyncio
+import contextvars
 import threading
 import time
 from pathlib import Path
@@ -65,6 +67,22 @@ class TestSmartApproval:
             result = _smart_approve("python -c \"print('hello')\"", "script execution via -c flag")
 
         assert result == "approve"
+
+    def test_guardian_runs_off_event_loop_with_profile_context(self):
+        scope = contextvars.ContextVar("approval_test_scope")
+        scope.set("researcher")
+
+        def guardian(**_kwargs):
+            with pytest.raises(RuntimeError, match="no running event loop"):
+                asyncio.get_running_loop()
+            assert scope.get() == "researcher"
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="APPROVE"))])
+
+        async def invoke():
+            with mock_patch("agent.auxiliary_client.call_llm", side_effect=guardian):
+                return _smart_approve("python -c 'print(1)'", "script execution")
+
+        assert asyncio.run(invoke()) == "approve"
 
     def test_smart_approval_does_not_allowlist_the_pattern_for_session(self, monkeypatch):
         session_key = "test-smart-per-command"

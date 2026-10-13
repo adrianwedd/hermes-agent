@@ -18,9 +18,17 @@ from typing import Any, Dict, List, Optional, Union
 from hermes_state_common import _BOUNDARY_END_REASONS
 from hermes_time import safe_strftime
 
-# Hidden from browsing/searching — integrations (HERMES_SESSION_SOURCE=tool), delegate
-# subagent runs, kanban workers are not the user's history.
-_HIDDEN_SESSION_SOURCES = ("kanban", "subagent", "tool")
+# Delegated and tool-integration transcripts are not standalone user history.
+# Kanban workers are task history: a fresh authorised worker needs to discover
+# their retained evidence in its own profile. Explicit cross-profile reads still
+# use the existing named-profile path; default search stays in the active profile.
+_HIDDEN_SESSION_SOURCES = ("subagent", "tool")
+
+
+def _hidden_sources(profile: str = None) -> tuple[str, ...]:
+    # A named-profile query is cross-profile access. Do not make worker
+    # transcripts newly discoverable across that boundary.
+    return _HIDDEN_SESSION_SOURCES + (("kanban",) if profile else ())
 # Searchable but DEMOTED below interactive sessions: cron vocabulary dominates bare
 # BM25 and starves out the user's own sessions ("recall blindness").
 # Automation sources that are kept searchable but DEMOTED below interactive sessions in discover ranking.
@@ -29,7 +37,7 @@ _HIDDEN_SESSION_SOURCES = ("kanban", "subagent", "tool")
 # user's own interactive sessions, producing "recall blindness" where only cron sessions surface (#19434).
 # Demoting — not excluding — keeps cron content reachable when it's the only match, while interactive
 # sessions always win when both match.
-_DEMOTED_SESSION_SOURCES = ("cron",)
+_DEMOTED_SESSION_SOURCES = ("cron", "kanban")
 
 # Read-shape per-message content cap. #69334 capped discovery bookends (1200) and
 # scroll windows (4000) but left ``_read_session`` returning whole messages, so a
@@ -273,7 +281,8 @@ def _discovery_entry(lineage_root: Optional[str], **fields) -> Dict[str, Any]:
     return entry
 
 
-def _title_match_result(db, query: str, current_lineage_root: Optional[str]) -> Optional[Dict[str, Any]]:
+def _title_match_result(db, query: str, current_lineage_root: Optional[str],
+                        link_profile: str = None) -> Optional[Dict[str, Any]]:
     """Discovery-shaped result when the query matches a session title, else None."""
     title_query = query.strip().strip("`'\"")  # models often quote a remembered title
     session_id = title_query and _quiet(lambda: db.resolve_session_by_title(title_query), None,
@@ -287,7 +296,7 @@ def _title_match_result(db, query: str, current_lineage_root: Optional[str]) -> 
         return None
     session_meta = _quiet(lambda: db.get_session(lineage_root) or db.get_session(session_id), None,
                           "get_session failed for title match %s", session_id) or {}
-    if session_meta.get("source") in _HIDDEN_SESSION_SOURCES:
+    if session_meta.get("source") in _hidden_sources(link_profile):
         return None
     messages = _quiet(lambda: db.get_messages(session_id), [], "get_messages failed for title match %s", session_id)
     anchor_id = messages[0].get("id") if messages else None
@@ -358,7 +367,7 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
     """Discovery shape: FTS5 plus adaptive or full result hydration."""
     current_lineage_root = _resolve_lineage(db, current_session_id) if current_session_id else None
     excluded_roots = _excluded_lineage_roots(db, exclude_session_ids or [])
-    title_result = _title_match_result(db, query, current_lineage_root)
+    title_result = _title_match_result(db, query, current_lineage_root, link_profile)
     # FTS rows are time-bounded in SQL (_search_filter_clauses); the title match bypasses that
     # query, so it is the one place the window is re-checked in Python.
     if title_result:
@@ -368,7 +377,7 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
             title_result = None
     raw_results, err = _loud(lambda: db.search_messages(
         query=query, role_filter=role_filter or ["user", "assistant"],
-        exclude_sources=list(_HIDDEN_SESSION_SOURCES), limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort,
+        exclude_sources=list(_hidden_sources(link_profile)), limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort,
         fields=_DISCOVER_SEARCH_FIELDS, after_ts=after_ts, before_ts=before_ts), "FTS5 search failed: %s", "Search failed")
     if err:
         return err
@@ -491,7 +500,7 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_p
             raise RuntimeError("session database does not support bounded recent-session browse")
         sessions = bounded_list(
             limit=limit + 15,  # extra so we can skip current / compression roots
-            exclude_sources=list(_HIDDEN_SESSION_SOURCES), timeout_seconds=3.0)
+            exclude_sources=list(_hidden_sources(link_profile)), timeout_seconds=3.0)
         current_root, has_compression_hop = (
             _resolve_to_parent(db, current_session_id) if current_session_id else (None, False))
         # Compression continuation: the root was summarised into the live child, so hide
