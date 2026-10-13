@@ -282,7 +282,6 @@ class TestPipeToShellNameCoverage:
             lambda _command: {"action": "allow", "findings": [], "summary": ""},
         )
         prompts = []
-
         def deny(*args, **kwargs):
             prompts.append((args, kwargs))
             return "deny"
