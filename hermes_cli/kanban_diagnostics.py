@@ -451,7 +451,7 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
 
 def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Trailing run outcomes show >= cfg["crash_threshold"] (default 2)
-    consecutive ``crashed`` with no ``completed``/``reclaimed`` between. Fires
+    consecutive ``crashed`` with no successful handoff or reclaim between. Fires
     earlier than ``repeated_failures`` for a crash-specific heads-up and
     suppresses itself when the unified rule is about to fire.
 
@@ -466,7 +466,9 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
 
     threshold = int(cfg.get("crash_threshold", 2))
     # Count trailing consecutive 'crashed' outcomes; a success (or manual
-    # reclaim) breaks the streak, other outcomes neither count nor break it.
+    # reclaim or review handoff) breaks the streak, other outcomes neither count
+    # nor break it. A review_requested run has advanced the card to review;
+    # older crashes are history, not a current failure to retry.
     consecutive = 0
     last_err = None
     for r in _runs_newest_first(runs):
@@ -475,7 +477,7 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
             consecutive += 1
             if last_err is None:
                 last_err = _task_field(r, "error")
-        elif outcome in {"completed", "reclaimed"}:
+        elif outcome in {"completed", "reclaimed", "review_requested"}:
             break
     if consecutive < threshold:
         return []

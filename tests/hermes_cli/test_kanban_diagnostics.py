@@ -111,6 +111,26 @@ def test_stuck_in_blocked_fires_past_threshold():
     assert d.data["age_hours"] >= 48
 
 
+def test_review_handoff_clears_historical_crash_streak():
+    runs = [
+        _run("crashed", run_id=1, error="old worker failure"),
+        _run("crashed", run_id=2, error="old worker failure"),
+        _run("review_requested", run_id=3),
+    ]
+    reviewed = kd.compute_task_diagnostics(_task(status="review"), [], runs)
+    assert "repeated_crashes" not in {d.kind for d in reviewed}
+
+    # A fresh crash after handoff is a new streak, not the old two plus one.
+    reopened = kd.compute_task_diagnostics(
+        _task(status="ready"), [], [*runs, _run("crashed", run_id=4)],
+    )
+    assert "repeated_crashes" not in {d.kind for d in reopened}
+
+    # No successful handoff: the same crashes still require diagnosis.
+    failing = kd.compute_task_diagnostics(_task(status="ready"), [], runs[:2])
+    assert "repeated_crashes" in {d.kind for d in failing}
+
+
 
 
 
