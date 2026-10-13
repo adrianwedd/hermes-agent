@@ -479,6 +479,18 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
                 last_err = _task_field(r, "error")
         elif outcome in {"completed", "reclaimed", "review_requested"}:
             break
+    # An explicit Ready -> Review handoff can append review_requested without
+    # synthesizing a run (no summary/metadata). The event is still the durable
+    # transition. Count only crashes after that handoff; older run outcomes are
+    # historical even when no review_requested run exists.
+    crashes_since_review = 0
+    for event in reversed(events):
+        kind = _event_kind(event)
+        if kind == "review_requested":
+            consecutive = min(consecutive, crashes_since_review)
+            break
+        if kind in {"crashed", "protocol_violation"}:
+            crashes_since_review += 1
     if consecutive < threshold:
         return []
     task_id = _task_field(task, "id")

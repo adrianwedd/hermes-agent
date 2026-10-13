@@ -131,6 +131,34 @@ def test_review_handoff_clears_historical_crash_streak():
     assert "repeated_crashes" in {d.kind for d in failing}
 
 
+def test_review_event_without_run_resets_only_prior_crashes():
+    runs = [_run("crashed", run_id=1), _run("crashed", run_id=2)]
+    events = [_event("crashed"), _event("crashed"), _event("review_requested")]
+    reviewed = kd.compute_task_diagnostics(_task(status="review"), events, runs)
+    assert "repeated_crashes" not in {d.kind for d in reviewed}
+
+    # A new crash after the handoff starts a fresh streak, not the old streak.
+    once = kd.compute_task_diagnostics(
+        _task(status="ready"), [*events, _event("crashed")],
+        [*runs, _run("crashed", run_id=3)],
+    )
+    assert "repeated_crashes" not in {d.kind for d in once}
+    twice = kd.compute_task_diagnostics(
+        _task(status="ready"), [*events, _event("crashed"), _event("crashed")],
+        [*runs, _run("crashed", run_id=3), _run("crashed", run_id=4)],
+    )
+    assert "repeated_crashes" in {d.kind for d in twice}
+
+    # A clean worker exit without its terminal call is stored as a crashed run
+    # but the corresponding event is named protocol_violation.
+    protocol = kd.compute_task_diagnostics(
+        _task(status="ready"),
+        [*events, _event("protocol_violation"), _event("protocol_violation")],
+        [*runs, _run("crashed", run_id=3), _run("crashed", run_id=4)],
+    )
+    assert "repeated_crashes" in {d.kind for d in protocol}
+
+
 
 
 
@@ -147,6 +175,32 @@ def test_review_handoff_clears_historical_crash_streak():
 # ---------------------------------------------------------------------------
 # Integration — runs through real kanban_db so sqlite.Row fields work
 # ---------------------------------------------------------------------------
+
+
+def test_summaryless_review_handoff_clears_crash_history(kanban_home):
+    """The public transition records an event but no run on this path."""
+    conn = kbc.connect()
+    try:
+        task_id = kb.create_task(conn, title="review after failures", assignee="worker")
+        for attempt in range(2):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, status, outcome, started_at, ended_at) "
+                "VALUES (?, 'crashed', 'crashed', ?, ?)",
+                (task_id, 100 + attempt, 100 + attempt),
+            )
+            kb._append_event(conn, task_id, "crashed", {"attempt": attempt})
+        conn.commit()
+
+        assert kb.request_review(conn, task_id, reviewer="reviewer") is True
+        runs = kb.list_runs(conn, task_id)
+        events = kb.list_events(conn, task_id)
+        assert len(runs) == 2  # no synthesized review run
+        assert any(event.kind == "review_requested" for event in events)
+        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        diags = kd.compute_task_diagnostics(task, events, runs)
+        assert "repeated_crashes" not in {d.kind for d in diags}
+    finally:
+        conn.close()
 
 
 def test_engine_works_on_sqlite_row_objects(kanban_home):
