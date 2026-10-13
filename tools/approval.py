@@ -772,8 +772,8 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
     """
     verdict = _smart_verdict(command, description, pattern_key, pattern_keys, session_key)
     if verdict == "error":
-        if human_present:
-            return None, False  # Preserve the existing manual approval route for an attached owner.
+        # A gateway/ask environment marker does not prove a person can answer a
+        # prompt. Never turn an engine fault into a ten-minute manual wait.
         return {
             "approved": False,
             "status": "approval_error",
