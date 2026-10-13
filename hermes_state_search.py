@@ -18,6 +18,7 @@ from hermes_state_common import (
     MAX_FTS5_QUERY_CHARS, SCHEMA_VERSION, _FTS_CJK_TRIGGERS,
     escape_like as _escape_like, fts_rebuild_admission, fts_trigram_session_sql, routed_sessions_setting,
 )
+from hermes_state_kanban_scope import kanban_scope_sql
 
 # Pre-split logger identity so log filtering/capture is unchanged.
 logger = logging.getLogger("hermes_state")
@@ -180,12 +181,9 @@ def _search_filter_clauses(
         where.append(f"s.source NOT IN ({','.join('?' for _ in exclude_sources)})")
         params.extend(exclude_sources)
     if kanban_scope is not None:
-        # Filter before LIMIT on every FTS, CJK, and LIKE route. The second
-        # parameter is a JSON array of exact legacy session IDs from this board's
-        # immutable run receipts, never a title/cwd inference.
-        stamp = "CASE WHEN json_valid(s.origin_json) THEN json_extract(s.origin_json, '$.kanban_board') END"
-        where.append(f"(s.source != 'kanban' OR ({stamp} = ? OR "
-                     f"({stamp} IS NULL AND s.id IN (SELECT value FROM json_each(?)))))")
+        # Filter the full ancestry before LIMIT on FTS, CJK, and LIKE routes.
+        # The JSON parameter is exact legacy IDs from immutable board receipts.
+        where.append(kanban_scope_sql("s"))
         params.extend(kanban_scope)
     if role_filter:
         where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")

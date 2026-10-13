@@ -79,6 +79,51 @@ class TestFormatTimestamp:
 # =========================================================================
 
 class TestBrowseShape:
+    def test_foreign_board_children_cannot_fill_browse_preselection(self, db, tmp_path, monkeypatch):
+        board_db = tmp_path / "board.db"
+        with sqlite3.connect(board_db) as conn:
+            conn.executescript("CREATE TABLE task_runs (id INTEGER, task_id TEXT, metadata TEXT); "
+                               "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        db.create_session("eligible", source="cli")
+        db.append_message("eligible", role="assistant", content="Retained eligible work")
+        db.create_session("foreign", source="kanban", origin_json=json.dumps({"kanban_board": "board-b"}))
+        db.create_session("unstamped", source="kanban")
+        db.append_message("unstamped", role="assistant", content="Unknown board work")
+        for index in range(130):
+            child = f"foreign_{index}"
+            db.create_session(child, source="cli", parent_session_id="foreign")
+            db.append_message(child, role="assistant", content=f"Foreign child {index}")
+
+        browsed = json.loads(session_search(db=db, limit=1))
+        assert [row["session_id"] for row in browsed["results"]] == ["eligible"]
+        scoped = ("board-a", "[]")
+        assert [row["id"] for row in db.list_recent_sessions_bounded(
+            limit=10, kanban_scope=scoped)] == ["eligible"]
+
+    def test_title_lookup_skips_newer_foreign_board_variant(self, db, tmp_path, monkeypatch):
+        board_db = tmp_path / "board.db"
+        with sqlite3.connect(board_db) as conn:
+            conn.executescript("CREATE TABLE task_runs (id INTEGER, task_id TEXT, metadata TEXT); "
+                               "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        db.create_session("board_a_title", source="kanban",
+                          origin_json=json.dumps({"kanban_board": "board-a"}))
+        db.create_session("board_b_title", source="kanban",
+                          origin_json=json.dumps({"kanban_board": "board-b"}))
+        db._conn.execute("UPDATE sessions SET title = ?, started_at = 1 WHERE id = ?",
+                         ("Shared Work", "board_a_title"))
+        db._conn.execute("UPDATE sessions SET title = ?, started_at = 2 WHERE id = ?",
+                         ("Shared Work #2", "board_b_title"))
+
+        found = json.loads(session_search(query="Shared Work", db=db, limit=1))
+        assert [row["session_id"] for row in found["results"]] == ["board_a_title"]
+        assert found["results"][0]["matched_role"] == "session_title"
+
     def test_exact_receipt_authorizes_only_compression_ancestors(self, db, tmp_path, monkeypatch):
         board_db = tmp_path / "board.db"
         with sqlite3.connect(board_db) as conn:
@@ -166,6 +211,10 @@ class TestBrowseShape:
         db.append_message("ordinary", role="assistant", content="unique worktoken ordinary")
         db.create_session("foreign_child", source="cli", parent_session_id="other_b")
         db.append_message("foreign_child", role="assistant", content="unique worktoken foreign_child")
+
+        sql_hits = db.search_messages(query="worktoken", limit=100,
+                                      kanban_scope=("board-a", json.dumps(["legacy_a"])))
+        assert {hit["session_id"] for hit in sql_hits} == {"same_a", "legacy_a", "ordinary"}
 
         found = json.loads(session_search(query="worktoken", db=db, limit=10))
         assert {r["session_id"] for r in found["results"]} == {"same_a", "legacy_a", "ordinary"}

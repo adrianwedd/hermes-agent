@@ -23,6 +23,7 @@ from hermes_state_common import (
     _sql_in_window, _sql_json_extract, _sql_session_last_active, _sql_session_last_active_by_id,
     escape_like as _escape_like, _SQL_IN_CHUNK, _id_chunks, _placeholders as _session_ids_placeholders,
 )
+from hermes_state_kanban_scope import kanban_scope_sql
 
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
@@ -1162,10 +1163,7 @@ class SessionSessionsMixin:
             candidate_clauses.append(f"s.source NOT IN ({placeholders})")
             candidate_params.extend(exclude_sources)
         if kanban_scope is not None:
-            stamp = "CASE WHEN json_valid(s.origin_json) THEN json_extract(s.origin_json, '$.kanban_board') END"
-            candidate_clauses.append(
-                f"(s.source != 'kanban' OR ({stamp} = ? OR "
-                f"({stamp} IS NULL AND s.id IN (SELECT value FROM json_each(?)))))")
+            candidate_clauses.append(kanban_scope_sql("s"))
             candidate_params.extend(kanban_scope)
         candidate_where = " AND ".join(candidate_clauses)
 

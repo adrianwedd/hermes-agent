@@ -411,7 +411,8 @@ def _title_match_result(db, query: str, current_lineage_root: Optional[str],
                         link_profile: str = None, kanban_scope=None) -> Optional[Dict[str, Any]]:
     """Discovery-shaped result when the query matches a session title, else None."""
     title_query = query.strip().strip("`'\"")  # models often quote a remembered title
-    session_id = title_query and _quiet(lambda: db.resolve_session_by_title(title_query), None,
+    session_id = title_query and _quiet(lambda: db.resolve_session_by_title(
+        title_query, **({"kanban_scope": kanban_scope} if kanban_scope is not None else {})), None,
                                         "resolve_session_by_title failed for %r", title_query)
     if not session_id:
         return None
