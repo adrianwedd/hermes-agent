@@ -34,14 +34,14 @@ name: Install & Update E2E
 #
 # Triggers:
 #   * every 12 hours, so upstream drift (a new uv, a Node bump, a PyPI change)
-#     surfaces on a schedule rather than in someone's review cycle;
+#     surfaces on a schedule rather than in someone's review cycle; hosted
+#     macOS legs are reserved for explicit dispatch/release acceptance;
 #   * manually, where you can pick the route (a preset or specific legs) and how many
 #     releases to sample;
 #   * pull_request, path-filtered to the install/update surface, runs ONLY the
 #     `pr` route (generate-e2e-matrix.mjs PR_SUBSET): installer-script ->
-#     hermes-update on linux (newest release -> PR, and PR -> NEXT), windows
-#     (PR -> NEXT) and macos (newest release -> PR), sampling just the newest tag.
-#     Four legs in parallel keep a PR's wall clock near one leg (~15 min);
+#     hermes-update on linux (newest release -> PR, and PR -> NEXT) and windows
+#     (PR -> NEXT), sampling just the newest tag.
 #     the full matrix multiplies that, so it stays on the clock and releases.
 #     A red scheduled run is reported by install-e2e-red.yml.
 
@@ -359,7 +359,9 @@ jobs:
 
   macos:
     name: ${{ matrix.name }}
-    if: needs.generate-matrix.outputs.macos-legs != '0'
+    # Native macOS acceptance remains available by explicit dispatch or from
+    # the release controller, not automatic PR/scheduled CI.
+    if: needs.generate-matrix.outputs.macos-legs != '0' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
     needs: generate-matrix
     strategy:
       fail-fast: false
