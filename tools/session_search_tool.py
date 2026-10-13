@@ -121,15 +121,6 @@ def _compression_edge(parent: dict, child: dict) -> bool:
     return isinstance(config, dict) and not (config.get("_delegate_from") or config.get("_branched_from"))
 
 
-def _unique_compression_child(db, parent_id: str, parent: dict) -> Optional[str]:
-    """Ambiguous legacy siblings cannot inherit each other's board receipt."""
-    children = _quiet(lambda: db._read_all(
-        "SELECT id FROM sessions WHERE parent_session_id = ?", (parent_id,)), [],
-        "compression children lookup failed for %s", parent_id)
-    valid = [row["id"] for row in children if _compression_edge(parent, _get_session_meta(db, row["id"]))]
-    return valid[0] if len(valid) == 1 else None
-
-
 def _expand_legacy_lineages(db, scope: Optional[tuple[str, str]]) -> Optional[tuple[str, str]]:
     """Extend exact board receipts across compression edges, never branch/delegate edges.
 
@@ -139,29 +130,43 @@ def _expand_legacy_lineages(db, scope: Optional[tuple[str, str]]) -> Optional[tu
     if scope is None:
         return None
     ids = set(json.loads(scope[1]))
-    stamped = _quiet(lambda: db._read_all(
-        "SELECT id FROM sessions WHERE source='kanban' AND "
-        "CASE WHEN json_valid(origin_json) THEN json_extract(origin_json, '$.kanban_board') END = ?",
-        (scope[0],)), [], "board-stamped session lookup failed")
-    ids.update(row["id"] for row in stamped)
+    # One profile-scoped pass builds the compression graph. A global visit cap
+    # silently hid older receipts once unrelated modern sessions crossed it;
+    # every real edge is now considered exactly once and cycles terminate by ID.
+    rows = _quiet(lambda: db._read_all(
+        "SELECT id, parent_session_id, end_reason, source, model_config, origin_json "
+        "FROM sessions WHERE source='kanban'"), [], "Kanban lineage lookup failed")
+    sessions = {row["id"]: dict(row) for row in rows}
+    children: dict[str, list[str]] = {}
+    for sid, meta in sessions.items():
+        try:
+            origin = json.loads(meta.get("origin_json") or "{}")
+        except (TypeError, ValueError):
+            origin = {}
+        if isinstance(origin, dict) and origin.get("kanban_board") == scope[0]:
+            ids.add(sid)
+        parent_id = meta.get("parent_session_id")
+        parent = sessions.get(parent_id)
+        if parent and _compression_edge(parent, meta):
+            children.setdefault(parent_id, []).append(sid)
+    unique_child = {parent_id: child_ids[0] for parent_id, child_ids in children.items()
+                    if len(child_ids) == 1}
     pending = list(ids)
     seen: set[str] = set()
-    while pending and len(seen) < 4096:
+    while pending:
         sid = pending.pop()
         if sid in seen:
             continue
         seen.add(sid)
-        meta = _get_session_meta(db, sid)
+        meta = sessions.get(sid)
         if not meta:
             continue
         parent_id = meta.get("parent_session_id")
-        if parent_id:
-            parent = _get_session_meta(db, parent_id)
-            if parent and _unique_compression_child(db, parent_id, parent) == sid and parent_id not in ids:
-                ids.add(parent_id)
-                pending.append(parent_id)
+        if parent_id and unique_child.get(parent_id) == sid and parent_id not in ids:
+            ids.add(parent_id)
+            pending.append(parent_id)
         if meta.get("end_reason") == "compression":
-            child_id = _unique_compression_child(db, sid, meta)
+            child_id = unique_child.get(sid)
             if child_id and child_id not in ids:
                 ids.add(child_id)
                 pending.append(child_id)

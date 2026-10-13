@@ -17,6 +17,7 @@ import pytest
 
 from hermes_state import SessionDB
 from tools.session_search_tool import (
+    _expand_legacy_lineages,
     _format_timestamp,
     _is_compacted_message,
     _resolve_to_parent,
@@ -79,6 +80,26 @@ class TestFormatTimestamp:
 # =========================================================================
 
 class TestBrowseShape:
+    def test_all_receipt_backed_lineages_expand_past_old_global_cap(self):
+        rows = []
+        receipt_ids = []
+        for index in range(4200):
+            parent, child = f"parent_{index}", f"child_{index}"
+            receipt_ids.append(child)
+            rows.append({"id": parent, "parent_session_id": None, "end_reason": "compression",
+                         "source": "kanban", "model_config": "{}", "origin_json": None})
+            rows.append({"id": child, "parent_session_id": parent, "end_reason": None,
+                         "source": "kanban", "model_config": "{}", "origin_json": None})
+
+        class DB:
+            def _read_all(self, _sql):
+                return rows
+
+        expanded = _expand_legacy_lineages(DB(), ("board-a", json.dumps(receipt_ids)))
+        assert len(json.loads(expanded[1])) == 8400
+        assert "parent_0" in json.loads(expanded[1])
+        assert "parent_4199" in json.loads(expanded[1])
+
     def test_foreign_board_children_cannot_fill_browse_preselection(self, db, tmp_path, monkeypatch):
         board_db = tmp_path / "board.db"
         with sqlite3.connect(board_db) as conn:
