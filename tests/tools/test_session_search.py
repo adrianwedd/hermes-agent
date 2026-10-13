@@ -9,6 +9,7 @@ Four calling shapes:
 All run zero LLM calls.
 """
 import json
+import sqlite3
 import time
 from datetime import datetime, timezone
 
@@ -101,6 +102,51 @@ class TestBrowseShape:
         monkeypatch.setattr("tools.session_search_tool._resolve_profile_db", lambda _profile: db)
         found = json.loads(session_search(query="zephyr", db=db, profile="other"))
         assert found["count"] == 0
+
+    def test_worker_recall_stays_on_its_board_across_all_shapes(self, db, tmp_path, monkeypatch):
+        board_db = tmp_path / "board.db"
+        with sqlite3.connect(board_db) as conn:
+            conn.executescript("CREATE TABLE task_runs (id INTEGER, task_id TEXT, metadata TEXT); "
+                               "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
+            conn.execute("INSERT INTO task_runs VALUES (1, 'task-a', ?)",
+                         (json.dumps({"worker_session_id": "legacy_a"}),))
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        for sid, board in (("same_a", "board-a"), ("other_b", "board-b")):
+            db.create_session(sid, source="kanban", origin_json=json.dumps({"kanban_board": board}))
+            db.append_message(sid, role="assistant", content=f"unique worktoken {sid}")
+        db.create_session("legacy_a", source="kanban")
+        db.append_message("legacy_a", role="assistant", content="unique worktoken legacy_a")
+        db.create_session("unknown", source="kanban")
+        db.append_message("unknown", role="assistant", content="unique worktoken unknown")
+        db.create_session("ordinary", source="cli")
+        db.append_message("ordinary", role="assistant", content="unique worktoken ordinary")
+        db.create_session("foreign_child", source="cli", parent_session_id="other_b")
+        db.append_message("foreign_child", role="assistant", content="unique worktoken foreign_child")
+
+        found = json.loads(session_search(query="worktoken", db=db, limit=10))
+        assert {r["session_id"] for r in found["results"]} == {"same_a", "legacy_a", "ordinary"}
+        browsed = json.loads(session_search(db=db, limit=10))
+        assert {r["session_id"] for r in browsed["results"]} == {"same_a", "legacy_a", "ordinary"}
+        for sid in ("same_a", "legacy_a", "ordinary"):
+            assert json.loads(session_search(db=db, session_id=sid))["success"] is True
+        for sid in ("other_b", "unknown", "foreign_child"):
+            read = json.loads(session_search(db=db, session_id=sid))
+            assert read["success"] is False and "worktoken" not in json.dumps(read)
+            anchor = db.get_messages(sid)[0]["id"]
+            scroll = json.loads(session_search(db=db, session_id=sid, around_message_id=anchor))
+            assert scroll["success"] is False and "worktoken" not in json.dumps(scroll)
+            monkeypatch.setattr("tools.session_search_tool._resolve_profile_db", lambda _profile: db)
+            named = json.loads(session_search(db=db, session_id=f"implementer/{sid}"))
+            assert named["success"] is False and "worktoken" not in json.dumps(named)
+
+        # Filter inside SQL before the 300-row scan cap, not after hydration.
+        for index in range(301):
+            db.append_message("other_b", role="assistant", content=f"floodtoken other-board {index}")
+        db.append_message("same_a", role="assistant", content="floodtoken authorized-board")
+        flooded = json.loads(session_search(query="floodtoken", db=db, limit=1, sort="newest"))
+        assert [r["session_id"] for r in flooded["results"]] == ["same_a"]
 
     def test_browse_uses_bounded_recent_path(self):
         class _DB:
@@ -571,6 +617,15 @@ class TestCrossProfileRead:
 # =========================================================================
 
 class TestCronDemotion:
+    def test_verbose_worker_does_not_hide_other_worker_lineage(self, db):
+        db.create_session("verbose", source="kanban")
+        for index in range(301):
+            db.append_message("verbose", role="assistant", content=f"needleworker receipt {index}")
+        db.create_session("next", source="kanban")
+        db.append_message("next", role="assistant", content="needleworker second task")
+        result = json.loads(session_search(query="needleworker", db=db, limit=2, sort="oldest"))
+        assert {entry["session_id"] for entry in result["results"]} == {"verbose", "next"}
+
     def test_worker_flood_cannot_hide_interactive_match_at_scan_boundary(self, db):
         db.create_session("interactive", source="desktop")
         db.append_message("interactive", role="assistant", content="orchid delivery status")

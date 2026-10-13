@@ -1132,6 +1132,7 @@ class SessionSessionsMixin:
         timeout_seconds: float = 3.0,
         candidate_limit: int = None,
         lineage_limit: int = None,
+        kanban_scope: tuple[str, str] = None,
     ) -> List[Dict[str, Any]]:
         """Latency-bounded recent-conversation browse (``session_search()``): preselect a small candidate set
         from the indexed durable activity timestamp (fallback ``started_at``), resolve only those across
@@ -1160,6 +1161,12 @@ class SessionSessionsMixin:
             placeholders = ",".join("?" for _ in exclude_sources)
             candidate_clauses.append(f"s.source NOT IN ({placeholders})")
             candidate_params.extend(exclude_sources)
+        if kanban_scope is not None:
+            stamp = "CASE WHEN json_valid(s.origin_json) THEN json_extract(s.origin_json, '$.kanban_board') END"
+            candidate_clauses.append(
+                f"(s.source != 'kanban' OR ({stamp} = ? OR "
+                f"({stamp} IS NULL AND s.id IN (SELECT value FROM json_each(?)))))")
+            candidate_params.extend(kanban_scope)
         candidate_where = " AND ".join(candidate_clauses)
 
         # A compression continuation is an implementation edge, unlike /new

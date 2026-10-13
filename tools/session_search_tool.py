@@ -10,10 +10,15 @@ No LLM calls — every shape returns actual DB messages.
 
 import json
 import logging
+import os
 import re
+import sqlite3
 import time
+from contextlib import closing
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import quote
 
 from hermes_state_common import _BOUNDARY_END_REASONS
 from hermes_time import safe_strftime
@@ -62,6 +67,67 @@ _COMPACTION_PREFIXES = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:")
 # carrying its transcript forward — unlike compression continuations and live delegation
 # children. The store's boundary set, so the two cannot drift.
 _FRESH_RESET_END_REASONS = _BOUNDARY_END_REASONS
+
+
+def _worker_kanban_scope() -> Optional[tuple[str, str]]:
+    """Board-pinned scope for worker recall; None for ordinary interactive callers.
+
+    Legacy sessions have no board stamp. Admit only exact session IDs recorded by
+    this board's run metadata or immutable registration events. An unavailable
+    board DB leaves those sessions hidden, never guessed from titles or cwd.
+    """
+    if not (os.environ.get("HERMES_KANBAN_TASK") or
+            (os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT") and os.environ.get("HERMES_KANBAN_BOARD"))):
+        return None
+    board = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    db_path = (os.environ.get("HERMES_KANBAN_DB") or "").strip()
+    ids: set[str] = set()
+    if board and db_path:
+        try:
+            uri = "file:" + quote(str(Path(db_path).resolve()), safe="/") + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=1)) as conn:
+                for (raw,) in conn.execute("SELECT metadata FROM task_runs WHERE metadata IS NOT NULL"):
+                    try:
+                        sid = json.loads(raw).get("worker_session_id")
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    if isinstance(sid, str) and sid:
+                        ids.add(sid)
+                for (raw,) in conn.execute(
+                        "SELECT e.payload FROM task_events e JOIN task_runs r "
+                        "ON r.id=e.run_id AND r.task_id=e.task_id "
+                        "WHERE e.kind='worker_session_registered'"):
+                    try:
+                        sid = json.loads(raw).get("worker_session_id")
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    if isinstance(sid, str) and sid:
+                        ids.add(sid)
+        except (OSError, sqlite3.Error) as exc:
+            logging.warning("Worker session receipts unavailable; legacy Kanban history hidden: %s", exc)
+    return board, json.dumps(sorted(ids))
+
+
+def _session_in_scope(db, sid: str, scope: Optional[tuple[str, str]]) -> bool:
+    if scope is None:
+        return True
+    legacy_ids = set(json.loads(scope[1]))
+    seen: set[str] = set()
+    while sid and sid not in seen:
+        seen.add(sid)
+        meta = _get_session_meta(db, sid)
+        if not meta:
+            return False
+        if meta.get("source") == "kanban":
+            try:
+                origin = json.loads(meta.get("origin_json") or "{}")
+            except (TypeError, ValueError):
+                origin = {}
+            stamped = origin.get("kanban_board") if isinstance(origin, dict) else None
+            if (stamped and stamped != scope[0]) or (not stamped and sid not in legacy_ids):
+                return False
+        sid = meta.get("parent_session_id")
+    return not sid
 
 
 def _quiet(fn, default, msg, *log_args, with_exc: bool = False):
@@ -282,12 +348,14 @@ def _discovery_entry(lineage_root: Optional[str], **fields) -> Dict[str, Any]:
 
 
 def _title_match_result(db, query: str, current_lineage_root: Optional[str],
-                        link_profile: str = None) -> Optional[Dict[str, Any]]:
+                        link_profile: str = None, kanban_scope=None) -> Optional[Dict[str, Any]]:
     """Discovery-shaped result when the query matches a session title, else None."""
     title_query = query.strip().strip("`'\"")  # models often quote a remembered title
     session_id = title_query and _quiet(lambda: db.resolve_session_by_title(title_query), None,
                                         "resolve_session_by_title failed for %r", title_query)
     if not session_id:
+        return None
+    if not _session_in_scope(db, session_id, kanban_scope):
         return None
     lineage_root = _resolve_lineage(db, session_id)
     # Same-lineage title hits are in-context only while the session is live;
@@ -363,11 +431,11 @@ def _hydrate_hit(db, lineage_root: str, match_info: Dict[str, Any], result_detai
 def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort: Optional[str],
               detail: str, current_session_id: str = None, link_profile: str = None,
               after_ts: Optional[int] = None, before_ts: Optional[int] = None,
-              exclude_session_ids: Optional[List[str]] = None) -> str:
+              exclude_session_ids: Optional[List[str]] = None, kanban_scope=None) -> str:
     """Discovery shape: FTS5 plus adaptive or full result hydration."""
     current_lineage_root = _resolve_lineage(db, current_session_id) if current_session_id else None
     excluded_roots = _excluded_lineage_roots(db, exclude_session_ids or [])
-    title_result = _title_match_result(db, query, current_lineage_root, link_profile)
+    title_result = _title_match_result(db, query, current_lineage_root, link_profile, kanban_scope)
     # FTS rows are time-bounded in SQL (_search_filter_clauses); the title match bypasses that
     # query, so it is the one place the window is re-checked in Python.
     if title_result:
@@ -378,7 +446,8 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
     hidden = _hidden_sources(link_profile)
     search_args = dict(query=query, role_filter=role_filter or ["user", "assistant"],
                        limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort,
-                       fields=_DISCOVER_SEARCH_FIELDS, after_ts=after_ts, before_ts=before_ts)
+                       fields=_DISCOVER_SEARCH_FIELDS, after_ts=after_ts, before_ts=before_ts,
+                       kanban_scope=kanban_scope)
     # A single SQL LIMIT can be filled entirely by repetitive worker/cron rows.
     # Reserve the interactive scan before filling from demoted sources, so source
     # priority holds even when more than _DISCOVER_SCAN_LIMIT automation rows match.
@@ -389,12 +458,26 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
         return err
     demoted_sources = [source for source in _DEMOTED_SESSION_SOURCES if source not in hidden]
     demoted = []
+    demoted_scan_limited = False
     if demoted_sources:
-        demoted, err = _loud(lambda: db.search_messages(
-            source_filter=demoted_sources, exclude_sources=list(hidden), **search_args),
-            "FTS5 worker search failed: %s", "Search failed")
-        if err:
-            return err
+        # One verbose automation session can own an entire 300-row page. Keep
+        # paging until enough distinct lineages are found, not just messages;
+        # bound the effort and disclose an incomplete scan instead of silently
+        # presenting one session as all retained worker history.
+        demoted_roots: set[str] = set()
+        for page in range(20):
+            page_rows, err = _loud(lambda: db.search_messages(
+                source_filter=demoted_sources, exclude_sources=list(hidden),
+                **{**search_args, "offset": page * _DISCOVER_SCAN_LIMIT}),
+                "FTS5 worker search failed: %s", "Search failed")
+            if err:
+                return err
+            demoted.extend(page_rows)
+            demoted_roots.update(_resolve_lineage(db, r["session_id"]) for r in page_rows)
+            if len(page_rows) < _DISCOVER_SCAN_LIMIT or len(demoted_roots) >= limit:
+                break
+        else:
+            demoted_scan_limited = True
     raw_results = interactive + demoted
     # See #19434.
     if not raw_results and not title_result:
@@ -415,6 +498,8 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
         if len(seen_sessions) >= limit:
             break
         raw_sid, resolved_sid = r["session_id"], _resolve_lineage(db, r["session_id"])
+        if not _session_in_scope(db, raw_sid, kanban_scope):
+            continue
         if raw_sid in excluded_roots or resolved_sid in excluded_roots:
             continue
         # Skip the current session lineage — UNLESS the hit's transcript has left live context. Three
@@ -443,7 +528,8 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
             results.append(entry)
     for entry in results:
         entry["link"] = _session_link(entry["session_id"], link_profile)
-    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), link_hint=(
+    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions),
+                             **({"demoted_scan_limited": True} if demoted_scan_limited else {}), link_hint=(
         "When referring the user to a session, write its `link` value "
         "verbatim inline mid-sentence (it renders as a titled link) — never "
         "as markdown, in backticks, on its own line, or next to the "
@@ -482,7 +568,7 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_prof
                                "Pass around_message_id (any id above) to scroll the middle.")} if truncated else {}))
 
 
-def _read_scoped(db, sid: str, profile: Optional[str]) -> str:
+def _read_scoped(db, sid: str, profile: Optional[str], kanban_scope=None) -> str:
     """Read shape scoped to ONE store: the caller's profile, or the profile it named.
 
     A miss is a miss. Profiles are isolated islands, so a bare id never falls through to
@@ -490,6 +576,8 @@ def _read_scoped(db, sid: str, profile: Optional[str]) -> str:
     transcript to any caller holding the id (#106761). The hint tells the model how to
     ask properly: ``@session:<profile>/<id>`` or ``profile=``.
     """
+    if not _session_in_scope(db, sid, kanban_scope):
+        return tool_error(f"session_id not found in this worker's board: {sid}", success=False)
     result = _read_session(db, sid, link_profile=profile)
     if json.loads(result).get("success") is not False or profile:
         return result
@@ -497,7 +585,8 @@ def _read_scoped(db, sid: str, profile: Optional[str]) -> str:
                       "profile, pass profile=<name> (or the @session:<profile>/<id> link).", success=False)
 
 
-def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_profile: str = None) -> str:
+def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_profile: str = None,
+                          kanban_scope=None) -> str:
     """Browse shape: metadata for the most recent sessions (no LLM, no FTS5)."""
     def _browse():
         # Never use list_sessions_rich(order_by_last_active=True) here: it walks every
@@ -511,7 +600,8 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_p
             raise RuntimeError("session database does not support bounded recent-session browse")
         sessions = bounded_list(
             limit=limit + 15,  # extra so we can skip current / compression roots
-            exclude_sources=list(_hidden_sources(link_profile)), timeout_seconds=3.0)
+            exclude_sources=list(_hidden_sources(link_profile)), timeout_seconds=3.0,
+            kanban_scope=kanban_scope)
         current_root, has_compression_hop = (
             _resolve_to_parent(db, current_session_id) if current_session_id else (None, False))
         # Compression continuation: the root was summarised into the live child, so hide
@@ -521,7 +611,8 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_p
             "session_id": s.get("id", ""), "link": _session_link(s.get("id", ""), link_profile),
             "title": s.get("title") or None, **{k: s.get(k, "") for k in ("source", "started_at", "last_active")},
             "message_count": s.get("message_count", 0), "preview": s.get("preview", "")}
-            for s in [x for x in sessions if x.get("id", "") not in hidden][:limit]]
+            for s in [x for x in sessions if x.get("id", "") not in hidden
+                      and _session_in_scope(db, x.get("id", ""), kanban_scope)][:limit]]
         return _ok(mode="browse", results=results, count=len(results), message=(
             f"Showing {len(results)} most recent sessions. Pass a query= to search, "
             "or session_id+around_message_id to scroll."))
@@ -549,13 +640,15 @@ def _anchor_in_live_context(db, anchor_state, anchor_sid: str, current_session_i
 
 
 def _scroll(db, session_id: str, around_message_id: int, window: int = 5,
-            current_session_id: str = None) -> str:
+            current_session_id: str = None, kanban_scope=None) -> str:
     """Scroll shape: a window centered on an anchor (no FTS5, no bookends)."""
     try:
         around_message_id = int(around_message_id)
     except (TypeError, ValueError):
         return tool_error("scroll requires integer around_message_id", success=False)
     window = _clamp_int(window, 5, 1, 20)
+    if not _session_in_scope(db, session_id, kanban_scope):
+        return tool_error(f"session_id not found in this worker's board: {session_id}", success=False)
     # Locate the anchor BEFORE the current-lineage guard (see _anchor_in_live_context).
     anchor_state = _get_message_storage_state(db, around_message_id)
     owning = (anchor_state or {}).get("session_id")
@@ -573,7 +666,7 @@ def _scroll(db, session_id: str, around_message_id: int, window: int = 5,
     if not messages and owning and owning != session_id:
         # Lineage rebind: the caller paired a parent session_id with a message id
         # living in a descendant — serve the owner's window transparently.
-        rebind_view = _same_lineage(db, session_id, owning) and _quiet(
+        rebind_view = _session_in_scope(db, owning, kanban_scope) and _same_lineage(db, session_id, owning) and _quiet(
             lambda: db.get_messages_around(owning, around_message_id, window=window),
             None, "rebind get_messages_around failed: %s", with_exc=True)
         if rebind_view and rebind_view.get("window"):
@@ -616,13 +709,14 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
     if profile_db is not None:
         db, current_session_id = profile_db, None
         owned_dbs.append(profile_db)
+    kanban_scope = _worker_kanban_scope()
     if isinstance(session_id, str) and session_id.strip():
         if around_message_id is not None:
-            return _scroll(db, session_id.strip(), around_message_id, window, current_session_id)
-        return _read_scoped(db, session_id.strip(), profile)
+            return _scroll(db, session_id.strip(), around_message_id, window, current_session_id, kanban_scope)
+        return _read_scoped(db, session_id.strip(), profile, kanban_scope)
     limit = _clamp_int(limit, 3, 1, 10)
     if not query or not isinstance(query, str) or not query.strip():
-        return _list_recent_sessions(db, limit, current_session_id, link_profile=profile)
+        return _list_recent_sessions(db, limit, current_session_id, link_profile=profile, kanban_scope=kanban_scope)
     sort_norm = sort.strip().lower() if isinstance(sort, str) else None
     try:
         after_ts, before_ts = _parse_iso_bound(after), _parse_iso_bound(before)
@@ -633,7 +727,7 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
         role_filter=([r.strip() for r in role_filter.split(",") if r.strip()] or None) if isinstance(role_filter, str) else None,
         detail="full" if isinstance(detail, str) and detail.strip().lower() == "full" else "adaptive",
         current_session_id=current_session_id, link_profile=profile, after_ts=after_ts, before_ts=before_ts,
-        exclude_session_ids=_normalize_exclude_session_ids(exclude_session_ids))
+        exclude_session_ids=_normalize_exclude_session_ids(exclude_session_ids), kanban_scope=kanban_scope)
 
 
 def session_search(query: str = "", role_filter: str = None, limit: int = 3, db=None,

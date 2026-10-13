@@ -2016,7 +2016,7 @@ def _json_dict(text: Any) -> dict:
 
 def _summarize_refused_tool_result(tool_name: str, args: dict, content: str) -> "str | None":
     """Summary for a call an approval or write guard refused (``BLOCKED: ...`` / ``status``
-    ``blocked``/``pending_approval``), else None. The per-tool summarizers describe the call as done
+    ``blocked``/``pending_approval``/``approval_error``), else None. The per-tool summarizers describe the call as done
     ("ran ...", "wrote to ..."), which would turn a user's denial into a record of the action and
     drop the "do not retry" instruction. Strictly below _PRUNE_MIN_CHARS, like the clarify summary,
     so later prune passes keep it."""
@@ -2027,6 +2027,8 @@ def _summarize_refused_tool_result(tool_name: str, args: dict, content: str) -> 
         error = content.strip()
     if status == "pending_approval":
         outcome = "awaiting the user's approval, not run"
+    elif status == "approval_error" or payload.get("approval_error") is True:
+        outcome = "approval engine failed, not run; diagnose before retrying"
     elif error and (status == "blocked" or error.lstrip().startswith("BLOCKED")):
         outcome = "BLOCKED, not run"
         if "NOT consented" in error:
