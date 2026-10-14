@@ -180,6 +180,17 @@
     archived: "hermes-kanban-dot-archived",
   };
 
+  function admissionDetails(t) {
+    const fact = t && t.card_facts && t.card_facts.dispatch;
+    if (!fact || !fact.stage) return null;
+    return h("div", { className: "hermes-kanban-admission-details", style: { whiteSpace: "pre-wrap", overflowWrap: "anywhere" } },
+      admissionChip(t),
+      h("div", null, fact.reason || ""),
+      fact.owner ? h("div", null, "Owner: " + fact.owner) : null,
+      fact.next_action ? h("div", null, "Next: " + fact.next_action) : null,
+    );
+  }
+
   function isDiagnosticEvent(kind) {
     return Object.prototype.hasOwnProperty.call(FALLBACK_DIAGNOSTIC_EVENT_LABELS, kind);
   }
@@ -4040,6 +4051,7 @@
         }) : null,
         t.created_by ? h(MetaRow, { label: tx(i18n, "createdBy", "Created by"), value: t.created_by }) : null,
       ),
+      admissionDetails(t),
       h(StatusActions, {
         task: t,
         onPatch: props.onPatch,
