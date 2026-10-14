@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
-from tests.tools.kanban_worker_fixtures import source_layout, worker_env  # noqa: F401
+from tests.tools.kanban_worker_fixtures import source_layout as source_layout, worker_env as worker_env
 
 
 @pytest.fixture
@@ -39,18 +39,20 @@ def test_local_payload_rejections_are_atomic(local_worker,tmp_path,monkeypatch,k
     tid,root=local_worker
     outside=tmp_path/'outside.txt';outside.write_text('not granted')
     path=root/'report';path.write_text('report')
-    args={'file_path':str(path)}
-    if kind=='outside':args['file_path']=str(outside)
-    elif kind=='file_symlink':path.unlink();path.symlink_to(outside)
-    elif kind=='directory_symlink':
-        (root/'link').symlink_to(tmp_path,target_is_directory=True);args['file_path']=str(root/'link/outside.txt')
-    elif kind=='fifo':path.unlink();os.mkfifo(path)
-    elif kind=='directory':args['file_path']=str(root)
-    elif kind=='oversize':monkeypatch.setattr(kb,'KANBAN_ATTACHMENT_MAX_BYTES',2)
-    elif kind=='protected':
-        path.rename(root/'.env');args['file_path']=str(root/'.env')
-    elif kind=='both':args['content_base64']='eA=='
-    elif kind=='missing':args={}
+    local={'file_path':str(path)}
+    cases={
+        'outside': ({'file_path':str(outside)},lambda:None),
+        'file_symlink': (local,lambda:(path.unlink(),path.symlink_to(outside))),
+        'directory_symlink': ({'file_path':str(root/'link/outside.txt')},lambda:(root/'link').symlink_to(tmp_path,target_is_directory=True)),
+        'fifo': (local,lambda:(path.unlink(),os.mkfifo(path))),
+        'directory': ({'file_path':str(root)},lambda:None),
+        'oversize': (local,lambda:monkeypatch.setattr(kb,'KANBAN_ATTACHMENT_MAX_BYTES',2)),
+        'protected': ({'file_path':str(root/'.env')},lambda:path.rename(root/'.env')),
+        'both': ({**local,'content_base64':'eA=='},lambda:None),
+        'missing': ({},lambda:None),
+    }
+    args,prepare=cases[kind]
+    prepare()
     with kbc.connect() as c:before=len(kb.list_attachments(c,tid))
     result=json.loads(kt._handle_attach(args));assert result.get('error'),result
     with kbc.connect() as c:assert len(kb.list_attachments(c,tid))==before

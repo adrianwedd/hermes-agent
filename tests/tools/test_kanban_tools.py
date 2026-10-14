@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from tests.tools.kanban_worker_fixtures import completion_metadata, source_layout, worker_env  # noqa: F401
+from tests.tools.kanban_worker_fixtures import completion_metadata, source_layout as source_layout, worker_env as worker_env
 
 
 # ---------------------------------------------------------------------------
