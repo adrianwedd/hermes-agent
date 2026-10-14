@@ -1589,7 +1589,8 @@ def check_respawn_guard(
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    from hermes_cli.kanban_resumed_wait import resolved_block_supersedes_error
+    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err) and not resolved_block_supersedes_error(conn, task_id, latest_outcome):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
