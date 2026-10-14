@@ -89,6 +89,10 @@ def _gateway_origin_json(agent: "AIAgent") -> Optional[str]:
     chat_id = getattr(agent, "_chat_id", None)
     session_key = getattr(agent, "_gateway_session_key", None)
     user_id = getattr(agent, "_user_id", None)
+    from agent.session_origin import kanban_worker_origin_json
+    worker_origin = kanban_worker_origin_json(_session_source_for_agent(agent.platform))
+    if worker_origin:
+        return worker_origin
     if not (chat_id or session_key or user_id):
         return None
     origin: Dict[str, Any] = {

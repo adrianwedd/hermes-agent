@@ -27,7 +27,13 @@ def test_posix_missing_process_returns_silently(monkeypatch):
         raise ProcessLookupError()
 
     monkeypatch.setattr(os, "getpgid", missing)
-    _legacy_kill_process_tree(MagicMock(pid=999))
+    proc = MagicMock(pid=999)
+    # A stale PID may now belong to the runner or another process. Never
+    # enumerate or kill its descendants after group identity lookup fails.
+    with patch("psutil.Process") as process:
+        _legacy_kill_process_tree(proc)
+    process.assert_not_called()
+    proc.kill.assert_called_once()
 
 
 @pytest.mark.platforms("posix")

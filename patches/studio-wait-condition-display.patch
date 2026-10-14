@@ -1,0 +1,22 @@
+--- a/hermes_cli/kanban_wait_contract.py
++++ b/hermes_cli/kanban_wait_contract.py
+@@ -240,13 +240,15 @@
+     candidates = [g for g in candidates if not protected or g["stage"] == decision["workflow_stage"]]
+     if candidates:
+         gate = sorted(candidates, key=lambda g: {"HELD": 0, "OPERATOR": 1, "BLOCKED": 2}.get(g["stage"], 3))[0]
++        from hermes_cli.kanban_wait_explanation import gate_explanation
++        reason, action = gate_explanation(gate)
+         decision.update(workflow_stage=gate["stage"], dispatchable=False, worker_executable_now=False,
+-                        reason=gate["reason"], owner=gate["resolver"], next_action=gate["current_unblock_action"],
+-                        current_next_action=gate["current_unblock_action"], current_next_action_type="unblock",
++                        reason=reason, owner=gate["resolver"], next_action=action,
++                        current_next_action=action, current_next_action_type="unblock",
+                         resume_condition={"evaluator": gate["evaluator"], "parameters": gate["parameters"]})
+-        decision.update(why_not_executable=gate["reason"], predicate={"identity": gate["id"], "revision": gate["revision"], **gate["parameters"]},
++        decision.update(why_not_executable=reason, predicate={"identity": gate["id"], "revision": gate["revision"], **gate["parameters"]},
+                         evaluation_mode=gate["evaluation_mode"], resolver=gate["resolver"], wake_trigger=gate["wake_trigger"],
+-                        current_unblock_action=gate["current_unblock_action"], post_gate_continuation=wait["continuation"],
++                        current_unblock_action=action, post_gate_continuation=wait["continuation"],
+                         remaining_gates=wait["remaining_gates"])
+     else:
+         from hermes_cli.kanban_wait_fallback import fields

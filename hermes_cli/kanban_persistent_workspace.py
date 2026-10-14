@@ -93,6 +93,13 @@ def resolve_new_task_workspace(
     )
     if workspace_kind == "dir" and project_repo is not None:
         workspace_path = project_repo
+    # Apply the legacy board directory before checking the pair. Persistent
+    # local tasks already have their configured root, and project tasks have
+    # their canonical repository at this point.
+    if workspace_path is None and project_repo is None and workspace_kind in {"dir", "worktree"}:
+        board_default = kb._board_meta_for(board).get("default_workdir")
+        if board_default:
+            workspace_path = str(board_default)
     kb._validate_workspace_pair(workspace_kind, workspace_path)
     return workspace_kind, workspace_path, branch_name, project_id, project_obj, project_repo
 

@@ -336,7 +336,7 @@ KANBAN_COMMENT_SCHEMA = _schema(
 KANBAN_ATTACH_SCHEMA = _schema(
     "kanban_attach",
     (
-        "Attach a file to a task by passing its bytes inline (base64). "
+        "Attach a local evidence file with file_path, or inline bytes with content_base64. Use exactly one. Local paths must be regular files inside the native task workspace; symlinks and protected paths are refused. File bytes stay out of model context. "
         "Use for genuine file artifacts the next worker or a human should "
         "be able to download — generated reports, images, exports. The "
         "file is stored as a real attachment (not a comment link) under "
@@ -349,13 +349,14 @@ KANBAN_ATTACH_SCHEMA = _schema(
                 "File name to store it under (e.g. 'report.pdf'). "
                 "Directory components are stripped; only the leaf is kept."
         )),
+        "file_path": _prop("string", "Absolute local artifact path within this task workspace. Preferred for generated evidence; filename defaults to its leaf."),
         "content_base64": {
             "type": "string",
             "description": "The file contents, base64-encoded. Max 25 MB decoded.",
         },
         "content_type": _prop("string", "Optional MIME type (e.g. 'application/pdf')."),
     },
-    ["filename", "content_base64"],
+    [],
 )
 
 KANBAN_ATTACH_URL_SCHEMA = _schema(

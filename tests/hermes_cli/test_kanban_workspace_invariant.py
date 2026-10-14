@@ -86,6 +86,17 @@ def test_create_dir_with_blank_path_is_rejected(kanban_home, blank):
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
 
 
+def test_create_dir_inherits_configured_board_workdir(kanban_home, tmp_path):
+    shared = tmp_path / "board-workdir"
+    shared.mkdir()
+    kb.write_board_metadata("default", default_workdir=str(shared), project_id="")
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="board directory", assignee="a", workspace_kind="dir")
+        task = kb.get_task(conn, tid)
+        assert (task.workspace_kind, task.workspace_path) == ("dir", str(shared))
+        assert _invalid_rows(conn) == 0
+
+
 def test_create_valid_dir_with_path_is_accepted(kanban_home, tmp_path):
     """A ``dir`` task with a real path stays valid, and keeps its kind, path
     and (documented) preservation semantics — the fix must not collateral-damage

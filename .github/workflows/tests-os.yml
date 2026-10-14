@@ -1,27 +1,19 @@
 name: OS-specific tests
 
-# Runs the tests that can only be trusted on their own host OS.
+# Runs Windows-only tests on their own host OS.
 #
 # The main Python suite (.github/workflows/tests.yml) runs on
 # ubuntu-latest and covers everything that is either platform-agnostic or
-# genuinely Linux-specific. Tests whose subject is macOS- or
-# Windows-specific behaviour carry a marker (see the ``_OS_MARKS`` block
-# comment in tests/conftest.py) and are SKIPPED on Linux, because faking
-# ``sys.platform`` on a Linux runner selects the branch under test without
-# reproducing any of the OS behaviour that branch exists for. This workflow
-# is where those markers actually execute:
-#
-#   macos    → ``-m platforms``    on macos-latest
-#   windows  → ``-m platforms``    on windows-latest-32-core and windows-latest-32-arm-core
+# genuinely Linux-specific. Windows-specific tests carry a marker (see
+# ``_OS_MARKS`` in tests/conftest.py) and are skipped on Linux. This workflow
+# runs them on Windows; macOS-marked tests run locally on Studio, not in CI.
 #
 # (tests/conftest.py's ``pytest_collection_modifyitems`` hook skips
-# foreign-OS ``platforms(...)`` markers on each host, so one shared ``-m
-# platforms`` expression selects "this host's own marked tests" on either
-# lane — the helper narrows WHICH FILES get imported first.)
+# foreign-OS ``platforms(...)`` markers on each host; the helper narrows
+# which files get imported before the marker selects tests.)
 #
 # Deliberately NOT sliced. The marked set is small (tens of tests, not
-# thousands), so one plain ``pytest`` process per OS is both faster and far
-# less machinery than the per-file parallel runner the Linux lane uses.
+# thousands), so one runner invocation per Windows architecture suffices.
 # Each lane FAILS when it selects zero tests (pytest exit code 5) — a
 # renamed marker or bad selector can never report a green job that ran
 # nothing.
@@ -72,16 +64,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Two slices on the free standard runner (3 cores, 3 workers): one lane ran
-          # ~7.5 min and became the slowest required job once the Linux suite split.
-          - name: macOS-only tests (1/2)
-            runner: macos-latest
-            marker: macos
-            slice: 1/2
-          - name: macOS-only tests (2/2)
-            runner: macos-latest
-            marker: macos
-            slice: 2/2
           - name: Windows-only tests
             runner: windows-latest-32-core
             marker: windows
@@ -157,8 +139,6 @@ jobs:
           # (see the workflow_call input). ``--ignore-glob`` keeps the file
           # list above intact, so a renamed test file still trips the
           # zero-tests guard rather than silently vanishing.
-          # (bash 3.2 on the macOS runner: an empty array under ``set -u`` is
-          # an unbound-variable error, hence the ``${arr[@]+...}`` idiom.)
           EXTRA_ARGS=()
           if [ "${{ inputs.desktop_updater }}" != "true" ]; then
             echo "desktop_updater lane off: skipping tests/scripts/desktop_update/test_desktop_update_windows_*.py"
@@ -182,7 +162,6 @@ jobs:
           # These files spawn nested PowerShell trees. CPU-count parallelism
           # starves cold child startup before the fixture's idle deadline.
           HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '16') || '' }}
-          HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
           OPENROUTER_API_KEY: ''

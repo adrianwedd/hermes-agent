@@ -9,6 +9,7 @@ Four calling shapes:
 All run zero LLM calls.
 """
 import json
+import sqlite3
 import time
 from datetime import datetime, timezone
 
@@ -16,6 +17,7 @@ import pytest
 
 from hermes_state import SessionDB
 from tools.session_search_tool import (
+    _expand_legacy_lineages,
     _format_timestamp,
     _is_compacted_message,
     _resolve_to_parent,
@@ -25,7 +27,10 @@ from tools.session_search_tool import (
 
 
 @pytest.fixture
-def db(tmp_path):
+def db(tmp_path, monkeypatch):
+    # These source-layout unit cases have no packaged parent manifest. Keep
+    # bootstrap's layout discovery inside the fixture, away from the live home.
+    monkeypatch.setattr("pm.environments.payload_venv", lambda _root: None)
     return SessionDB(tmp_path / "state.db")
 
 
@@ -78,6 +83,208 @@ class TestFormatTimestamp:
 # =========================================================================
 
 class TestBrowseShape:
+    def test_all_receipt_backed_lineages_expand_past_old_global_cap(self):
+        rows = []
+        receipt_ids = []
+        for index in range(4200):
+            parent, child = f"parent_{index}", f"child_{index}"
+            receipt_ids.append(child)
+            rows.append({"id": parent, "parent_session_id": None, "end_reason": "compression",
+                         "source": "kanban", "model_config": "{}", "origin_json": None})
+            rows.append({"id": child, "parent_session_id": parent, "end_reason": None,
+                         "source": "kanban", "model_config": "{}", "origin_json": None})
+
+        class DB:
+            def _read_all(self, _sql):
+                return rows
+
+        expanded = _expand_legacy_lineages(DB(), ("board-a", json.dumps(receipt_ids)))
+        assert len(json.loads(expanded[1])) == 8400
+        assert "parent_0" in json.loads(expanded[1])
+        assert "parent_4199" in json.loads(expanded[1])
+
+    def test_foreign_board_children_cannot_fill_browse_preselection(self, db, tmp_path, monkeypatch):
+        board_db = tmp_path / "board.db"
+        with sqlite3.connect(board_db) as conn:
+            conn.executescript("CREATE TABLE task_runs (id INTEGER, task_id TEXT, metadata TEXT); "
+                               "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        db.create_session("eligible", source="cli")
+        db.append_message("eligible", role="assistant", content="Retained eligible work")
+        db.create_session("foreign", source="kanban", origin_json=json.dumps({"kanban_board": "board-b"}))
+        db.create_session("unstamped", source="kanban")
+        db.append_message("unstamped", role="assistant", content="Unknown board work")
+        for index in range(130):
+            child = f"foreign_{index}"
+            db.create_session(child, source="cli", parent_session_id="foreign")
+            db.append_message(child, role="assistant", content=f"Foreign child {index}")
+
+        browsed = json.loads(session_search(db=db, limit=1))
+        assert [row["session_id"] for row in browsed["results"]] == ["eligible"]
+        scoped = ("board-a", "[]")
+        assert [row["id"] for row in db.list_recent_sessions_bounded(
+            limit=10, kanban_scope=scoped)] == ["eligible"]
+
+    def test_title_lookup_skips_newer_foreign_board_variant(self, db, tmp_path, monkeypatch):
+        board_db = tmp_path / "board.db"
+        with sqlite3.connect(board_db) as conn:
+            conn.executescript("CREATE TABLE task_runs (id INTEGER, task_id TEXT, metadata TEXT); "
+                               "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        with sqlite3.connect(board_db) as conn:
+            conn.execute("INSERT INTO task_runs VALUES (1, 'task-a', ?)",
+                         (json.dumps({"worker_session_id": "board_a_title"}),))
+        db.create_session("board_a_title", source="kanban",
+                          origin_json=json.dumps({"kanban_board": "board-a"}))
+        db.create_session("board_b_title", source="kanban",
+                          origin_json=json.dumps({"kanban_board": "board-b"}))
+        db._conn.execute("UPDATE sessions SET title = ?, started_at = 1 WHERE id = ?",
+                         ("Shared Work", "board_a_title"))
+        db._conn.execute("UPDATE sessions SET title = ?, started_at = 2 WHERE id = ?",
+                         ("Shared Work #2", "board_b_title"))
+
+        found = json.loads(session_search(query="Shared Work", db=db, limit=1))
+        assert [row["session_id"] for row in found["results"]] == ["board_a_title"]
+        assert found["results"][0]["matched_role"] == "session_title"
+
+    def test_exact_receipt_authorizes_only_compression_ancestors(self, db, tmp_path, monkeypatch):
+        board_db = tmp_path / "board.db"
+        with sqlite3.connect(board_db) as conn:
+            conn.executescript("CREATE TABLE task_runs (id INTEGER, task_id TEXT, metadata TEXT); "
+                               "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
+            conn.execute("INSERT INTO task_runs VALUES (1, 'task-a', ?)",
+                         (json.dumps({"worker_session_id": "continuation"}),))
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        db.create_session("ancestor", source="kanban")
+        db.append_message("ancestor", role="assistant", content="lineageproof earlier work")
+        db.end_session("ancestor", "compression")
+        db.create_session("continuation", source="kanban", parent_session_id="ancestor")
+        db.append_message("continuation", role="assistant", content="lineageproof later work")
+        db.create_session("branch", source="kanban", parent_session_id="ancestor",
+                          model_config={"_branched_from": "ancestor"})
+        db.append_message("branch", role="assistant", content="lineageproof forbidden branch")
+
+        found = json.loads(session_search(query="lineageproof", db=db))
+        assert {r["session_id"] for r in found["results"]} <= {"ancestor", "continuation"}
+        assert found["results"]
+        assert json.loads(session_search(session_id="ancestor", db=db))["success"] is True
+        assert json.loads(session_search(session_id="continuation", db=db))["success"] is True
+        anchor = db.get_messages("ancestor")[0]["id"]
+        assert json.loads(session_search(session_id="ancestor", around_message_id=anchor, db=db))["success"] is True
+        assert json.loads(session_search(session_id="branch", db=db))["success"] is False
+
+        # A receipt must not spill across two unmarked legacy continuations:
+        # their board ownership cannot be inferred from the shared parent.
+        with sqlite3.connect(board_db) as conn:
+            conn.execute("INSERT INTO task_runs VALUES (2, 'task-a', ?)",
+                         (json.dumps({"worker_session_id": "ambiguous_a"}),))
+        db.create_session("ambiguous_parent", source="kanban")
+        db.end_session("ambiguous_parent", "compression")
+        for sid in ("ambiguous_a", "ambiguous_b"):
+            db.create_session(sid, source="kanban", parent_session_id="ambiguous_parent")
+            db.append_message(sid, role="assistant", content=f"ambiguoustoken {sid}")
+        for sid in ("ambiguous_a", "ambiguous_b"):
+            assert json.loads(session_search(session_id=sid, db=db))["success"] is False
+        assert json.loads(session_search(query="ambiguoustoken", db=db))["count"] == 0
+
+    def test_worker_history_is_discoverable_and_expandable(self, db):
+        db.create_session("worker", source="kanban")
+        db.append_message("worker", role="assistant", content="Accepted zephyr result; remaining publication")
+        db.create_session("other", source="subagent")
+        db.append_message("other", role="assistant", content="zephyr private delegation")
+
+        found = json.loads(session_search(query="zephyr", db=db))
+        assert [r["session_id"] for r in found["results"]] == ["worker"]
+        assert found["results"][0]["source"] == "kanban"
+        read = json.loads(session_search(session_id="worker", db=db))
+        assert read["success"] is True
+        assert "remaining publication" in json.dumps(read)
+
+        browsed = json.loads(session_search(db=db, limit=10))
+        assert "worker" in [r["session_id"] for r in browsed["results"]]
+        assert "other" not in [r["session_id"] for r in browsed["results"]]
+
+    def test_named_profile_does_not_discover_worker_history(self, db, monkeypatch):
+        db.create_session("worker", source="kanban")
+        db.append_message("worker", role="assistant", content="zephyr private worker result")
+        monkeypatch.setattr("tools.session_search_tool._resolve_profile_db", lambda _profile: db)
+        found = json.loads(session_search(query="zephyr", db=db, profile="other"))
+        assert found["count"] == 0
+
+    def test_worker_recall_stays_on_its_board_across_all_shapes(self, db, tmp_path, monkeypatch):
+        board_db = tmp_path / "board.db"
+        with sqlite3.connect(board_db) as conn:
+            conn.executescript("CREATE TABLE task_runs (id INTEGER, task_id TEXT, metadata TEXT); "
+                               "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
+            conn.execute("INSERT INTO task_runs VALUES (1, 'task-a', ?)",
+                         (json.dumps({"worker_session_id": "legacy_a"}),))
+            conn.execute("INSERT INTO task_runs VALUES (3, 'task-a', ?)",
+                         (json.dumps({"worker_session_id": "same_a"}),))
+            conn.execute("INSERT INTO task_runs VALUES (2, 'task-a', '{}')")
+            conn.execute("INSERT INTO task_events VALUES (2, 'task-a', 'worker_session_registered', ?)",
+                         (json.dumps({"worker_session_id": "legacy_event"}),))
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        for sid, board in (("same_a", "board-a"), ("other_b", "board-b")):
+            db.create_session(sid, source="kanban", origin_json=json.dumps({"kanban_board": board}))
+            db.append_message(sid, role="assistant", content=f"unique worktoken {sid}")
+        db.create_session("legacy_a", source="kanban")
+        db.append_message("legacy_a", role="assistant", content="unique worktoken legacy_a")
+        db.create_session("legacy_event", source="kanban")
+        db.append_message("legacy_event", role="assistant", content="unique worktoken legacy_event")
+        db.create_session("unknown", source="kanban")
+        db.append_message("unknown", role="assistant", content="unique worktoken unknown")
+        db.create_session("ordinary", source="cli")
+        db.append_message("ordinary", role="assistant", content="unique worktoken ordinary")
+        db.create_session("foreign_child", source="cli", parent_session_id="other_b")
+        db.append_message("foreign_child", role="assistant", content="unique worktoken foreign_child")
+
+        sql_hits = db.search_messages(query="worktoken", limit=100,
+                                      kanban_scope=("board-a", json.dumps(["legacy_a", "legacy_event", "same_a"])))
+        assert {hit["session_id"] for hit in sql_hits} == {
+            "same_a", "legacy_a", "legacy_event", "ordinary"}
+
+        found = json.loads(session_search(query="worktoken", db=db, limit=10))
+        assert {r["session_id"] for r in found["results"]} == {
+            "same_a", "legacy_a", "legacy_event", "ordinary"}
+        browsed = json.loads(session_search(db=db, limit=10))
+        assert {r["session_id"] for r in browsed["results"]} == {
+            "same_a", "legacy_a", "legacy_event", "ordinary"}
+        for sid in ("same_a", "legacy_a", "legacy_event", "ordinary"):
+            assert json.loads(session_search(db=db, session_id=sid))["success"] is True
+        for sid in ("other_b", "unknown", "foreign_child"):
+            read = json.loads(session_search(db=db, session_id=sid))
+            assert read["success"] is False and "worktoken" not in json.dumps(read)
+            anchor = db.get_messages(sid)[0]["id"]
+            scroll = json.loads(session_search(db=db, session_id=sid, around_message_id=anchor))
+            assert scroll["success"] is False and "worktoken" not in json.dumps(scroll)
+            monkeypatch.setattr("tools.session_search_tool._resolve_profile_db", lambda _profile: db)
+            named = json.loads(session_search(db=db, session_id=f"implementer/{sid}"))
+            assert named["success"] is False and "worktoken" not in json.dumps(named)
+
+        # Filter inside SQL before the 300-row scan cap, not after hydration.
+        for index in range(301):
+            db.append_message("other_b", role="assistant", content=f"floodtoken other-board {index}")
+        db.append_message("same_a", role="assistant", content="floodtoken authorized-board")
+        flooded = json.loads(session_search(query="floodtoken", db=db, limit=1, sort="newest"))
+        assert [r["session_id"] for r in flooded["results"]] == ["same_a"]
+
+        # A non-Kanban descendant of another board is rejected by lineage,
+        # but must not hide an eligible interactive hit behind the first page.
+        db.append_message("ordinary", role="assistant", content="childfloodtoken eligible")
+        for index in range(301):
+            db.append_message("foreign_child", role="assistant",
+                              content=f"childfloodtoken foreign-board {index}")
+        child_flood = json.loads(session_search(query="childfloodtoken", db=db, limit=1, sort="newest"))
+        assert [r["session_id"] for r in child_flood["results"]] == ["ordinary"]
+
     def test_browse_uses_bounded_recent_path(self):
         class _DB:
             rich_called = False
@@ -547,6 +754,48 @@ class TestCrossProfileRead:
 # =========================================================================
 
 class TestCronDemotion:
+    def test_current_worker_flood_does_not_end_demoted_pagination(self, db, tmp_path, monkeypatch):
+        board_db = tmp_path / "board.db"
+        with sqlite3.connect(board_db) as conn:
+            conn.executescript("CREATE TABLE task_runs (id INTEGER, task_id TEXT, metadata TEXT); "
+                               "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        with sqlite3.connect(board_db) as conn:
+            for index, sid in enumerate(("current", "earlier")):
+                conn.execute("INSERT INTO task_runs VALUES (?, 'task-a', ?)",
+                             (index, json.dumps({"worker_session_id": sid})))
+        for sid in ("current", "earlier"):
+            db.create_session(sid, source="kanban", origin_json=json.dumps({"kanban_board": "board-a"}))
+        for index in range(301):
+            db.append_message("current", role="assistant", content=f"handoffneedle current {index}")
+        db.append_message("earlier", role="assistant", content="handoffneedle retained work")
+        found = json.loads(session_search(query="handoffneedle", db=db, limit=1,
+                                          sort="oldest", current_session_id="current"))
+        assert [r["session_id"] for r in found["results"]] == ["earlier"]
+
+    def test_verbose_worker_does_not_hide_other_worker_lineage(self, db):
+        db.create_session("verbose", source="kanban")
+        for index in range(301):
+            db.append_message("verbose", role="assistant", content=f"needleworker receipt {index}")
+        db.create_session("next", source="kanban")
+        db.append_message("next", role="assistant", content="needleworker second task")
+        result = json.loads(session_search(query="needleworker", db=db, limit=2, sort="oldest"))
+        assert {entry["session_id"] for entry in result["results"]} == {"verbose", "next"}
+
+    def test_worker_flood_cannot_hide_interactive_match_at_scan_boundary(self, db):
+        db.create_session("interactive", source="desktop")
+        db.append_message("interactive", role="assistant", content="orchid delivery status")
+        db.create_session("worker_flood", source="kanban")
+        for i in range(301):
+            db.append_message("worker_flood", role="assistant",
+                              content=f"orchid delivery status worker receipt {i}")
+
+        result = json.loads(session_search(query="orchid delivery status", limit=2,
+                                           sort="newest", db=db))
+        assert [row["session_id"] for row in result["results"]] == ["interactive", "worker_flood"]
+
     def _seed_cron_and_interactive(self, db):
         """One interactive (telegram) session and several cron sessions, all
         matching the same query. Cron rows accumulate repetitive vocabulary

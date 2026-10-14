@@ -274,6 +274,7 @@ class TestPipeToShellNameCoverage:
         """End to end through check_all_command_guards: `curl | zsh` must reach the
         approval callback carrying the pipe description, not just the pattern scan."""
         from tools.approval import check_all_command_guards
+        monkeypatch.setattr("tools.approval_context._get_approval_mode", lambda: "on")
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
         monkeypatch.setattr(
@@ -281,7 +282,6 @@ class TestPipeToShellNameCoverage:
             lambda _command: {"action": "allow", "findings": [], "summary": ""},
         )
         prompts = []
-
         def deny(*args, **kwargs):
             prompts.append((args, kwargs))
             return "deny"

@@ -1,0 +1,8 @@
+{
+  "target": "hermes_cli/kanban_wait_contract.py",
+  "before_sha256": "01cc8e9ece9937d5c7ab46630254afbe185e9f34620819d173c19167ec7f9d6a",
+  "after_sha256": "fa41f350d73d20ffdcd694fda9d910b9be2cfa321793db468e3e26f9380c05c3",
+  "required_module": "hermes_cli.kanban_wait_explanation",
+  "scope": "Read-only explanation of recorded attestation conditions. No gate identity, declaration, predicate, resolver, satisfaction, or dispatch-authority change.",
+  "application": "This public branch omits the retained Studio wait subsystem. Apply this narrow integration hunk only to the matching retained source; do not publish the mixed Studio snapshot. The current private build includes the applied hunk and public helper."
+}

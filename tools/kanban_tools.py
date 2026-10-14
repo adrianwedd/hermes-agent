@@ -985,17 +985,10 @@ def _store_attachment(board, tid, filename, data, content_type) -> str:
 
 @_kanban_handler("kanban_attach")
 def _handle_attach(args: dict, **kw) -> str:
-    """Attach an inline (base64) file to a task."""
-    tid = _worker_guard("kanban_attach", args)
-    filename = _require_text(args, "filename")
-    content_b64 = _require_text(args, "content_base64")
-    import base64
-    import binascii
-    try:
-        data = base64.b64decode(str(content_b64), validate=True)
-    except (binascii.Error, ValueError) as e:
-        raise _Reject(f"content_base64 is not valid base64: {e}")
-    return _store_attachment(args.get("board"), tid, filename, data, args.get("content_type"))
+    """Attach bounded evidence through the native worker owner interface."""
+    from tools.kanban_attachment_payload import attach_payload
+    return attach_payload(args)
+
 
 
 _MAX_ATTACH_URL_REDIRECTS = 5

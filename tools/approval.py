@@ -771,6 +771,16 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
     normal, potentially persistent manual behavior.
     """
     verdict = _smart_verdict(command, description, pattern_key, pattern_keys, session_key)
+    if verdict == "error":
+        # A gateway/ask environment marker does not prove a person can answer a
+        # prompt. Never turn an engine fault into a ten-minute manual wait.
+        return {
+            "approved": False,
+            "status": "approval_error",
+            "approval_error": True,
+            "message": "Smart approval engine failed before a decision. No approval or denial was issued; "
+                       "repair the guardian route before retrying this command.",
+        }, False
     if verdict == "approve":
         _reset_denials(session_key)
         logger.debug(spec.smart_log.format(command=command[:60], description=description, session_key=session_key))

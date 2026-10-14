@@ -1038,7 +1038,9 @@ def _run_approval_guards(command: str, env_type: str, config: Dict[str, Any], *,
             f"Command denied: {desc}. "
             "Use the approval prompt to allow it, or rephrase the command."
         )
-        raise _Rejected(_error_json(approval.get("message", fallback_msg), status="blocked",
+        raise _Rejected(_error_json(approval.get("message", fallback_msg),
+                                    status=approval.get("status", "blocked"),
+                                    approval_error=approval.get("approval_error", False),
                                     **({"user_summary": approval["user_summary"]} if approval.get("user_summary") else {})))
     desc = approval.get("description", "flagged as dangerous")
     if approval.get("user_approved"):

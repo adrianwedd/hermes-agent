@@ -451,7 +451,7 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
 
 def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Trailing run outcomes show >= cfg["crash_threshold"] (default 2)
-    consecutive ``crashed`` with no ``completed``/``reclaimed`` between. Fires
+    consecutive ``crashed`` with no successful handoff or reclaim between. Fires
     earlier than ``repeated_failures`` for a crash-specific heads-up and
     suppresses itself when the unified rule is about to fire.
 
@@ -466,7 +466,9 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
 
     threshold = int(cfg.get("crash_threshold", 2))
     # Count trailing consecutive 'crashed' outcomes; a success (or manual
-    # reclaim) breaks the streak, other outcomes neither count nor break it.
+    # reclaim or review handoff) breaks the streak, other outcomes neither count
+    # nor break it. A review_requested run has advanced the card to review;
+    # older crashes are history, not a current failure to retry.
     consecutive = 0
     last_err = None
     for r in _runs_newest_first(runs):
@@ -475,8 +477,28 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
             consecutive += 1
             if last_err is None:
                 last_err = _task_field(r, "error")
-        elif outcome in {"completed", "reclaimed"}:
+        elif outcome in {"completed", "reclaimed", "review_requested"}:
             break
+    # An explicit Ready -> Review handoff can append review_requested without
+    # synthesizing a run (no summary/metadata). The event is still the durable
+    # transition. Count only crashes after that handoff; older run outcomes are
+    # historical even when no review_requested run exists.
+    crashes_since_review = 0
+    # list_events orders by second-resolution wall time, which can move
+    # backwards. Event ids are the durable insertion order; fixture events
+    # without ids retain their caller-provided order.
+    ordered_events = (
+        sorted(events, key=lambda event: int(_task_field(event, "id")))
+        if events and all(_task_field(event, "id") is not None for event in events)
+        else events
+    )
+    for event in reversed(ordered_events):
+        kind = _event_kind(event)
+        if kind == "review_requested":
+            consecutive = min(consecutive, crashes_since_review)
+            break
+        if kind in {"crashed", "protocol_violation"}:
+            crashes_since_review += 1
     if consecutive < threshold:
         return []
     task_id = _task_field(task, "id")

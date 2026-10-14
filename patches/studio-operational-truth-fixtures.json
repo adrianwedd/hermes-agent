@@ -1,0 +1,10 @@
+{
+  "target": "tests/hermes_cli/test_kanban_operational_truth.py",
+  "private_base_commit": "5613e5346f18c6e43975330f773c5461bbaae7c7",
+  "before_sha256": "cc8d203bcfe8e41a7b5a2075aaa8362cbc6df5d4610701b89a426c53f947da8f",
+  "after_sha256": "62fddaec5ba58592237e28906e452bc707c437c6c9577dce671fa0727c4e0a20",
+  "format": "unified diff with zero context; verify exact before hash, then git apply --unidiff-zero; verify after hash",
+  "reason": "Independent native1094 review established canonical WAITING under normalised Todo and fail-closed unbound scheduling prose. Complete the old fixtures without changing runtime/authority guards or removing any test. Add an explicit unbound-prose negative control.",
+  "validation": "scripts/run_tests.sh -q tests/hermes_cli/test_kanban_operational_truth.py:24 passed0 failed",
+  "source_privacy": "Only this narrow test delta is public; full private integration stays in retained private bundle."
+}

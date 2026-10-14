@@ -191,8 +191,22 @@ class SessionTitlesMixin:
             "WHERE s.title = ?", (title,))
         return self._session_row_dict(row) if row else None
 
-    def resolve_session_by_title(self, title: str) -> Optional[str]:
+    def resolve_session_by_title(self, title: str, *, kanban_scope: Optional[tuple[str, str]] = None) -> Optional[str]:
         """Resolve a title to a session ID, preferring the latest "title #N" continuation."""
+        if kanban_scope is not None:
+            from hermes_state_kanban_scope import kanban_scope_sql
+
+            visible = kanban_scope_sql("s")
+            exact = self._read_one(
+                f"SELECT s.id FROM sessions s WHERE s.title = ? AND {visible} "
+                "ORDER BY s.started_at DESC LIMIT 1", (title, *kanban_scope))
+            if exact is not None and title == self.CANONICAL_BOT_CHAT_TITLE:
+                return exact["id"]
+            numbered = self._read_one(
+                f"SELECT s.id FROM sessions s WHERE s.title LIKE ? ESCAPE '\\' AND {visible} "
+                "ORDER BY s.started_at DESC LIMIT 1",
+                (f"{_escape_like(title)} #%", *kanban_scope))
+            return numbered["id"] if numbered else (exact["id"] if exact else None)
         exact = self.get_session_by_title(title)
         # Exception to the "#N continuation" preference: the canonical Bot Chat's identity
         # IS its exact title (Bot Mode re-resolves it by name on every open, no id pointer).

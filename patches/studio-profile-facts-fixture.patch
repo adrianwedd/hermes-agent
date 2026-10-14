@@ -1,0 +1,14 @@
+--- a/tests/hermes_cli/test_kanban_card_facts_profiles.py
++++ b/tests/hermes_cli/test_kanban_card_facts_profiles.py
+@@ -191,10 +191,10 @@
+         calls.append(args)
+         raise error_type("configuration backend failed")
+ 
++    tasks = [_task(conn, "analyst"), _task(conn, "analyst")]
+     monkeypatch.setattr(config_effective, "load_user_config_effective", broken_loader)
+     clock = [0.0]
+     monkeypatch.setattr(facts, "monotonic", lambda: clock[0])
+-    tasks = [_task(conn, "analyst"), _task(conn, "analyst")]
+     for _ in range(3):
+         cards = facts.card_facts(conn, tasks, facts.native_config_for, lambda *_: {})
+         assert all(c["profile"]["reason_code"] == "config_load_failed" for c in cards.values())

@@ -542,7 +542,7 @@ def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
                 killpg(pgid, sig)
             except (ProcessLookupError, PermissionError, OSError):
                 break
-    else:
+    elif pgid is not None:
         # No group signal is safe, so descendants are killed individually;
         # a bare proc.kill() would leave them holding the capture pipe's write
         # end open (the #68915 communicate() hang). The snapshot must precede

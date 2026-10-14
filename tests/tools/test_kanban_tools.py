@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from tests.tools.kanban_worker_fixtures import completion_metadata, source_layout as source_layout, worker_env as worker_env
 
 
 # ---------------------------------------------------------------------------
@@ -40,35 +41,6 @@ def test_kanban_tools_hidden_without_env_var(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # Handler happy paths
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def worker_env(monkeypatch, tmp_path):
-    """Simulate being a worker: HERMES_HOME isolated, HERMES_KANBAN_TASK set
-    after we've created the task."""
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
-    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
-    from pathlib import Path as _Path
-    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
-
-    from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_db_connect as kbc
-    kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
-    conn = kbc.connect()
-    try:
-        tid = kb.create_task(conn, title="worker-test", assignee="test-worker")
-        kb.claim_task(conn, tid)
-        run_id = kb._current_run_id(conn, tid)
-    finally:
-        conn.close()
-    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
-    # A real dispatcher always pins the worker's run id; simulate that so the
-    # run-lifecycle tools can prove ownership (see test_unbound_worker_cannot_mutate_card).
-    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
-    return tid
 
 
 def test_show_defaults_to_env_task_id(worker_env):
@@ -381,11 +353,18 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
     conn = kbc.connect()
     try:
         goal_task_id = kb.create_task(
-            conn, title="goal-mode-test", assignee="test-worker",
+            conn, title="goal-mode-test", assignee="unit-implementer",
             body="Must achieve X with verified evidence.", goal_mode=True
         )
+        monkeypatch.setenv("HERMES_PROFILE", "unit-implementer")
         kb.claim_task(conn, goal_task_id)
-        run_id = kb._current_run_id(conn, goal_task_id)
+        implementation_run = kb._current_run_id(conn, goal_task_id)
+        assert kb.request_review(conn, goal_task_id, summary="Unit fixture independent handoff",
+                                 reviewer="test-worker", expected_run_id=implementation_run)
+        monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+        review = kb.claim_review_task(conn, goal_task_id)
+        assert review is not None
+        run_id = review.current_run_id
     finally:
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
@@ -402,7 +381,9 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
     monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
 
     # Attempt to complete should be rejected
-    out = kt._handle_complete({"summary": "I did some stuff but not X"})
+    with kbc.connect() as evidence_conn:
+        metadata = completion_metadata(evidence_conn, goal_task_id)
+    out = kt._handle_complete({"summary": "I did some stuff but not X", "metadata": metadata})
     d = json.loads(out)
     assert "error" in d
     assert "Goal completion rejected by judge" in d["error"]

@@ -15,8 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
-from dataclasses import field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -26,6 +25,7 @@ from typing import Optional
 from typing import TYPE_CHECKING
 
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+from hermes_cli.kanban_dispatch_workspace import preview_workspace_conflict
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -1588,7 +1588,8 @@ def check_respawn_guard(
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    from hermes_cli.kanban_resumed_wait import resolved_block_supersedes_error
+    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err) and not resolved_block_supersedes_error(conn, task_id, latest_outcome):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
@@ -2074,12 +2075,6 @@ def _dispatch_lane_task(
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.
-        # Honour kanban.default_assignee: when the dispatcher hits an unassigned ready task and an
-        # operator-configured fallback exists, persist the assignment and proceed. This removes the
-        # dashboard footgun where a task created without an assignee parks in 'ready' forever even though
-        # the operator's intent ("default") was perfectly clear (#27145). Mutating the row (not just the
-        # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
-        # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
         if not dry_run:
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
@@ -2092,6 +2087,9 @@ def _dispatch_lane_task(
             per_profile_running[name] = per_profile_running.get(name, 0) + 1
 
     if dry_run:
+        if preview_workspace_conflict(conn, task_id, result.spawned):
+            result.respawn_guarded.append((task_id, "workspace_owner_conflict"))
+            return False
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True

@@ -9,6 +9,8 @@ Inspired by OpenAI Codex's Smart Approvals guardian subagent.
 """
 
 import logging
+import asyncio
+import threading
 import time
 from tools import approval_context as _ctx
 
@@ -31,6 +33,38 @@ _SYSTEM_PROMPT = (
     "Respond with exactly one word: APPROVE, DENY, or ESCALATE"
 )
 _VERDICTS = {"APPROVE": "approve", "DENY": "deny"}
+
+
+def _call_guardian(call, **kwargs):
+    """Keep synchronous Relay's coroutine runner off the caller's event loop.
+
+    Some tool surfaces invoke the synchronous approval gate on an asyncio thread.
+    Relay refuses to run its awaitable there; carry the profile and secret scopes
+    into a worker thread while the existing synchronous gate waits for its result.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return call(**kwargs)
+    from agent.memory_provider import spawn_context_thread
+
+    done = threading.Event()
+    outcome = {}
+
+    def run():
+        try:
+            outcome["result"] = call(**kwargs)
+        except BaseException as exc:
+            logger.exception("Smart approval guardian thread failed")
+            outcome["error"] = exc
+        finally:
+            done.set()
+
+    spawn_context_thread(run, name="smart-approval-guardian").start()
+    done.wait()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
 
 
 def _strip_line_comment(line: str) -> str:
@@ -72,7 +106,7 @@ def _get_smart_policy() -> str:
 
 
 def _smart_approve(command: str, description: str) -> str:
-    """Ask the auxiliary LLM; return 'approve', 'deny', or 'escalate' (uncertain/failed).
+    """Ask the auxiliary LLM; return a verdict or 'error' for engine failure.
 
     Inspired by OpenAI Codex's Smart Approvals guardian subagent (openai/codex#13860).
     """
@@ -106,7 +140,7 @@ def _smart_approve(command: str, description: str) -> str:
             'via -c flag" but is completely harmless.\n\n'
             "Respond with exactly one word: APPROVE, DENY, or ESCALATE"
         )
-        response = call_llm(
+        response = _call_guardian(call_llm,
             task="approval", temperature=0, max_tokens=16, timeout=smart_timeout,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
         )
@@ -121,19 +155,19 @@ def _smart_approve(command: str, description: str) -> str:
             finish_reason = getattr(response.choices[0], "finish_reason", None)
             logger.warning("Smart approvals: guardian returned an empty answer "
                            "(finish_reason=%s), escalating", finish_reason)
-            return "escalate"
+            return "error"
         return _VERDICTS.get(answer, "escalate")
     except Exception as e:
         # WARNING, not DEBUG: a failed/blocked guardian call is a real event
         # the operator needs to see (the hang was invisible at DEBUG).
         logger.warning("Smart approvals: LLM call failed after %.1fs (%s: %s), escalating",
                        time.monotonic() - _smart_t0, type(e).__name__, e)
-        return "escalate"
+        return "error"
 
 
 def _smart_verdict(command: str, description: str, pattern_key: str,
                    pattern_keys: list[str], session_key: str) -> str:
-    """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'.
+    """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate' | 'error'.
     Redaction is observer-payload preparation, not approval policy: if it fails,
     skip observability rather than leak raw data or block the LLM decision."""
     try:
