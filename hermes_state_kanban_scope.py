@@ -21,8 +21,8 @@ def kanban_scope_sql(alias: str) -> str:
         SELECT CASE WHEN
             SUM(CASE WHEN a.parent_id IS NULL THEN 1 ELSE 0 END) > 0
             AND SUM(CASE WHEN a.source = 'kanban' AND NOT COALESCE((
-                {stamp} = ? OR ({stamp} IS NULL
-                    AND a.id IN (SELECT value FROM json_each(?)))
+                ({stamp} = ? OR {stamp} IS NULL)
+                    AND a.id IN (SELECT value FROM json_each(?))
             ), 0) THEN 1 ELSE 0 END) = 0
             THEN 1 ELSE 0 END
         FROM ancestry a

@@ -3486,11 +3486,8 @@ def request_review(
 ):
     """``running``/``ready`` -> ``review``; never touches block recurrence accounting.
 
-    Implementer and reviewer are recorded on the event so requested changes
-    route back to the right profile; ``reviewer`` reassigns the task, and on
-    re-review defaults to the latest ``changes_requested`` provenance. A live
-    claim is only cleared with proof of ownership (``expected_run_id``) or
-    ``force=True``. Returns ``bool``, or ``(ok, reason)`` with ``with_reason``.
+    Record both actors; re-review retains ``changes_requested`` provenance.
+    Live claims require ownership or ``force``; ``with_reason`` returns ``(ok, reason)``.
 
     ``metadata["artifacts"]`` names the handoff's deliverable
     files; a review handoff is the last implementer transition, and the
@@ -3511,6 +3508,9 @@ def request_review(
     # must be durable BEFORE anything can clean the scratch workspace up: for a
     # review-bound card the reviewer's completion is the cleanup trigger.
     metadata = _merge_completion_prose_artifacts(conn, task_id, metadata, summary=summary, result=None)
+    from hermes_cli.kanban_review_reroute import reroute_pending_review
+    if (rerouted := reroute_pending_review(conn, task_id, reviewer, summary, metadata, force=force, expected_run_id=expected_run_id)) is not None:
+        return _ret(*rerouted)
     now = int(time.time())
     # Staged copies live outside the txn: a rollback after staging must not
     # leave orphans that make the retry stage ``name_1.ext`` beside them.

@@ -72,7 +72,7 @@ _FRESH_RESET_END_REASONS = _BOUNDARY_END_REASONS
 def _worker_kanban_scope() -> Optional[tuple[str, str]]:
     """Board-pinned scope for worker recall; None for ordinary interactive callers.
 
-    Legacy sessions have no board stamp. Admit only exact session IDs recorded by
+    Board slugs are reusable. Admit only exact session IDs recorded by
     this board's run metadata or immutable registration events. An unavailable
     board DB leaves those sessions hidden, never guessed from titles or cwd.
     """
@@ -139,12 +139,6 @@ def _expand_legacy_lineages(db, scope: Optional[tuple[str, str]]) -> Optional[tu
     sessions = {row["id"]: dict(row) for row in rows}
     children: dict[str, list[str]] = {}
     for sid, meta in sessions.items():
-        try:
-            origin = json.loads(meta.get("origin_json") or "{}")
-        except (TypeError, ValueError):
-            origin = {}
-        if isinstance(origin, dict) and origin.get("kanban_board") == scope[0]:
-            ids.add(sid)
         parent_id = meta.get("parent_session_id")
         parent = sessions.get(parent_id)
         if parent and _compression_edge(parent, meta):
@@ -189,7 +183,7 @@ def _session_in_scope(db, sid: str, scope: Optional[tuple[str, str]]) -> bool:
             except (TypeError, ValueError):
                 origin = {}
             stamped = origin.get("kanban_board") if isinstance(origin, dict) else None
-            if (stamped and stamped != scope[0]) or (not stamped and sid not in legacy_ids):
+            if (stamped and stamped != scope[0]) or sid not in legacy_ids:
                 return False
         sid = meta.get("parent_session_id")
     return not sid

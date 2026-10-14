@@ -132,6 +132,9 @@ class TestBrowseShape:
         monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
         monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
         monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        with sqlite3.connect(board_db) as conn:
+            conn.execute("INSERT INTO task_runs VALUES (1, 'task-a', ?)",
+                         (json.dumps({"worker_session_id": "board_a_title"}),))
         db.create_session("board_a_title", source="kanban",
                           origin_json=json.dumps({"kanban_board": "board-a"}))
         db.create_session("board_b_title", source="kanban",
@@ -218,6 +221,8 @@ class TestBrowseShape:
                                "CREATE TABLE task_events (run_id INTEGER, task_id TEXT, kind TEXT, payload TEXT);")
             conn.execute("INSERT INTO task_runs VALUES (1, 'task-a', ?)",
                          (json.dumps({"worker_session_id": "legacy_a"}),))
+            conn.execute("INSERT INTO task_runs VALUES (3, 'task-a', ?)",
+                         (json.dumps({"worker_session_id": "same_a"}),))
             conn.execute("INSERT INTO task_runs VALUES (2, 'task-a', '{}')")
             conn.execute("INSERT INTO task_events VALUES (2, 'task-a', 'worker_session_registered', ?)",
                          (json.dumps({"worker_session_id": "legacy_event"}),))
@@ -239,7 +244,7 @@ class TestBrowseShape:
         db.append_message("foreign_child", role="assistant", content="unique worktoken foreign_child")
 
         sql_hits = db.search_messages(query="worktoken", limit=100,
-                                      kanban_scope=("board-a", json.dumps(["legacy_a", "legacy_event"])))
+                                      kanban_scope=("board-a", json.dumps(["legacy_a", "legacy_event", "same_a"])))
         assert {hit["session_id"] for hit in sql_hits} == {
             "same_a", "legacy_a", "legacy_event", "ordinary"}
 
@@ -754,6 +759,10 @@ class TestCronDemotion:
         monkeypatch.setenv("HERMES_KANBAN_TASK", "task-a")
         monkeypatch.setenv("HERMES_KANBAN_BOARD", "board-a")
         monkeypatch.setenv("HERMES_KANBAN_DB", str(board_db))
+        with sqlite3.connect(board_db) as conn:
+            for index, sid in enumerate(("current", "earlier")):
+                conn.execute("INSERT INTO task_runs VALUES (?, 'task-a', ?)",
+                             (index, json.dumps({"worker_session_id": sid})))
         for sid in ("current", "earlier"):
             db.create_session(sid, source="kanban", origin_json=json.dumps({"kanban_board": "board-a"}))
         for index in range(301):
