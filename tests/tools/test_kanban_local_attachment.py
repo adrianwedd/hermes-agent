@@ -7,6 +7,9 @@ import pytest
 from tests.tools.kanban_worker_fixtures import source_layout as source_layout, worker_env as worker_env
 
 
+# Descriptor-relative, no-symlink local reads are a POSIX capability.
+pytestmark = pytest.mark.platforms("macos", "linux")
+
 @pytest.fixture
 def local_worker(worker_env, tmp_path):
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
