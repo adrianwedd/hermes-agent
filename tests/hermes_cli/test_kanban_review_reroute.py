@@ -16,5 +16,5 @@ def test_reroute_returned_review_preserves_implementer(tmp_path, monkeypatch):
         assert json.loads(row[0])['implementer'] == 'builder'
         assert kb.get_task(conn, tid).status == 'review'
         assert kb.get_task(conn, tid).assignee == 'reviewer'
-        assert not kb.request_review(conn, tid, summary='Self review', reviewer='builder', force=True)
+        assert not kb.request_review(conn, tid, summary='Self review', reviewer=' builder ', force=True)
         assert kb.get_task(conn, tid).assignee == 'reviewer'

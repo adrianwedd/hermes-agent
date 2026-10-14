@@ -5,6 +5,7 @@ import json
 def reroute_pending_review(conn, task_id, reviewer, summary, metadata, *, force=False, expected_run_id=None):
     """Explicit operator recovery of a returned review, preserving its implementer."""
     from hermes_cli import kanban_db as kb
+    reviewer = kb._canonical_assignee(reviewer)
     task = kb.get_task(conn, task_id)
     if not task or task.status != 'review':
         return None
