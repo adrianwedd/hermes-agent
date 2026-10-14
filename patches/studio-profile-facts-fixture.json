@@ -1,0 +1,7 @@
+{
+  "target": "tests/hermes_cli/test_kanban_card_facts_profiles.py",
+  "before_sha256": "d664a280bd936c69915497599f72266621dbf82ddda7fedfbad66a6004e62745",
+  "after_sha256": "e9573dc9a9270d7db7a0d419c325f95e8774cdcaf4027d1b0a1cc5f9d456cdc1",
+  "scope": "Create task fixtures through normal workspace policy before installing a profile-facts-specific failing config loader. Assertions, error cases, guardrails and policy checks are unchanged.",
+  "application": "Narrow test-fixture delta for the retained Studio integration; no runtime-code change."
+}
