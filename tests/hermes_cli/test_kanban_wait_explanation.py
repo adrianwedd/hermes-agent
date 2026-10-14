@@ -23,3 +23,19 @@ def test_opaque_and_protected_gates_keep_their_declared_explanation():
                 'current_unblock_action': 'Use the protected native transition',
                 'parameters': {'native_condition': native}}
         assert gate_explanation(gate) == (gate['reason'], gate['current_unblock_action'])
+
+
+def test_full_scheduled_release_qualification_and_specific_resolver_are_visible():
+    gate = {'evaluator': 'attestation', 'resolver': 'operator', 'reason': 'Generic attestation',
+            'current_unblock_action': 'Record the qualified attestation',
+            'parameters': {'native_condition': {'scheduled_payload': {
+                'reason': 'Await the approved measurement window.',
+                'resume_condition': 'Policy approval is not a measurement grant; an explicit applicable grant is required.',
+                'resolver': 'Adrian and operations/runtime measurement owner'}}}}
+    before = deepcopy(gate)
+    reason, action = gate_explanation(gate)
+    assert 'Await the approved measurement window.' in reason
+    assert 'Policy approval is not a measurement grant; an explicit applicable grant is required.' in reason
+    assert 'Adrian and operations/runtime measurement owner' in reason
+    assert reason in action
+    assert gate == before and gate['resolver'] == 'operator'

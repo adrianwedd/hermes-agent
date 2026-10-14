@@ -13,7 +13,7 @@ def gate_explanation(gate):
     scheduled = native.get('scheduled_payload') or {}
     clauses = []
     for record, keys in ((native, ('reason', 'requirement', 'resume_condition')),
-                         (selected, ('resume_condition',)), (scheduled, ('reason',))):
+                         (selected, ('resume_condition',)), (scheduled, ('reason', 'resume_condition'))):
         if not isinstance(record, dict):
             continue
         for key in keys:
@@ -26,5 +26,16 @@ def gate_explanation(gate):
             clauses.append(value)
     if not clauses:
         return reason, action
+    clauses.extend('Recorded condition resolver: ' + value
+                   for value in _recorded_resolvers((native, selected, scheduled), gate.get('resolver')))
     condition = '\n'.join(clauses)
     return condition, 'Satisfy the recorded condition: ' + condition + '\n' + action
+
+
+def _recorded_resolvers(records, declared_resolver):
+    resolvers = []
+    for record in records:
+        value = record.get('resolver') if isinstance(record, dict) else None
+        if isinstance(value, str) and value.strip() and value != declared_resolver and value not in resolvers:
+            resolvers.append(value)
+    return resolvers
