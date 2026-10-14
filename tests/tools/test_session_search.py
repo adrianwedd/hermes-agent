@@ -27,7 +27,10 @@ from tools.session_search_tool import (
 
 
 @pytest.fixture
-def db(tmp_path):
+def db(tmp_path, monkeypatch):
+    # These source-layout unit cases have no packaged parent manifest. Keep
+    # bootstrap's layout discovery inside the fixture, away from the live home.
+    monkeypatch.setattr("pm.environments.payload_venv", lambda _root: None)
     return SessionDB(tmp_path / "state.db")
 
 
