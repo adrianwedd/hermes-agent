@@ -1463,13 +1463,6 @@ def create_task(
 
     now = int(time.time())
 
-    # Only persistent kinds inherit the board ``default_workdir``: a scratch
-    # task inheriting it would point cleanup at the user's source tree.
-    if workspace_path is None and project_repo is None and workspace_kind in {"dir", "worktree"}:
-        board_default = _board_meta_for(board).get("default_workdir")
-        if board_default:
-            workspace_path = str(board_default)
-
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
         task_id = _new_task_id()
