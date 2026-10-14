@@ -1,0 +1,51 @@
+--- a/tests/hermes_cli/test_kanban_operational_truth.py
++++ b/tests/hermes_cli/test_kanban_operational_truth.py
+@@ -195,0 +196,23 @@
++    from hermes_cli.kanban_wait_contract import declaration
++    from hermes_cli.kanban_wait_transitions import declare_wait
++    import json
++    tid = kb.create_task(board, title="Run measured trial", assignee="bench", workspace_kind="scratch")
++    gate = declaration("measurement-window", "attestation", resolver="Adrian and runtime controller",
++                       parameters={"required_assertions": ["explicit_window_granted", "six_preflight_checks_recorded"],
++                                   "condition": "Applicable window grant and all six preflight checks recorded."},
++                       reason="Explicit exclusive-window approval remains absent.",
++                       action="Record the applicable grant and all six preflight checks", stage="WAITING")
++    declare_wait(board, tid, [gate], {"state": "todo", "selected_next_action": {
++        "phase": "READY", "type": "worker_action", "action": "Run the authorised measured trial"}},
++        provenance={"fixture": "qualified authority condition, not legacy scheduling prose"})
++    d = decide(board, kb.get_task(board, tid))
++    assert d["workflow_stage"] == "WAITING" and not d["dispatchable"]
++    assert d["owner"] == "Adrian and runtime controller"
++    assert d["resume_condition"]["evaluator"] == "attestation"
++    condition = json.dumps(d["resume_condition"])
++    assert "scheduled time" not in condition
++    assert "six preflight" in condition
++    assert kb.claim_task(board, tid) is None
++
++
++def test_unbound_scheduled_prose_stays_a_workflow_fault(board):
+@@ -198,6 +221,5 @@
+-    kb._append_event(board, tid, "scheduled", {"reason": "Explicit exclusive-window approval remains absent.", "resolver": "Adrian and runtime controller", "resume_condition": "Applicable window grant and all six preflight checks recorded."})
+-    d = decide(board, kb.get_task(board, tid))
+-    assert d["workflow_stage"] == "WAITING" and not d["dispatchable"]
+-    assert d["owner"] == "Adrian and runtime controller"
+-    assert "scheduled time" not in d["resume_condition"]
+-    assert "six preflight" in d["resume_condition"]
++    kb._append_event(board, tid, "scheduled", {"reason": "Explicit exclusive-window approval remains absent.",
++                    "resolver": "Adrian and runtime controller", "resume_condition": "A grant is still required."})
++    d = decide(board, kb.get_task(board, tid))
++    assert d["workflow_stage"] == "WORKFLOW_FAULT" and not d["dispatchable"]
++    assert kb.claim_task(board, tid) is None
+@@ -225,2 +247,4 @@
+-    assert task.status == "scheduled" and task.current_run_id is None
+-    assert decide(board, task)["workflow_stage"] == "WAITING"
++    assert task.status == "todo" and task.current_run_id is None
++    decision = decide(board, task)
++    assert decision["workflow_stage"] == "WAITING" and not decision["dispatchable"]
++    assert kb.claim_task(board, tid) is None
+@@ -268 +292,4 @@
+-    assert kb.get_task(board, tid).status == "scheduled"
++    assert kb.get_task(board, tid).status == "todo"
++    decision = decide(board, kb.get_task(board, tid))
++    assert decision["workflow_stage"] == "WAITING" and not decision["dispatchable"]
++    assert kb.claim_task(board, tid) is None
