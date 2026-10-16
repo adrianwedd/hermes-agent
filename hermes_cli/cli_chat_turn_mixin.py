@@ -352,8 +352,12 @@ class CLIChatTurnMixin:
         self._pending_one_turn_model_restore = None
         try:
             from agent.notification_presentation import notification_turn
+            from agent.tts_playback import tts_playback_owner
             muted = getattr(turn, "mute_notification_reply", False)
-            with notification_turn(self.agent, muted=muted, session_id=self.session_id):
+            with (
+                notification_turn(self.agent, muted=muted, session_id=self.session_id),
+                tts_playback_owner(self.agent, "native" if getattr(self, "_voice_tts", False) else None),
+            ):
                 turn.result = self.agent.run_conversation(
                     user_message=agent_message,
                     conversation_history=self.conversation_history[:-1],

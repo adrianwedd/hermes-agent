@@ -474,6 +474,7 @@ def _apply_output_hooks(
             user_message=original_user_message,
             assistant_response=final_response,
             conversation_history=list(messages),
+            tts_playback_owner=getattr(agent, "_tts_playback_owner", None),
             model=agent.model,
             platform=platform,
         )
