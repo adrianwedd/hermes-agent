@@ -250,6 +250,8 @@ def decision_fields(conn, task_id, decision, *, wait_override=None):
                         evaluation_mode=gate["evaluation_mode"], resolver=gate["resolver"], wake_trigger=gate["wake_trigger"],
                         current_unblock_action=action, post_gate_continuation=wait["continuation"],
                         remaining_gates=wait["remaining_gates"])
+        from hermes_cli.kanban_wait_explanation import native_unblock_fields
+        native_unblock_fields(conn, task_id, decision, wait)
     else:
         from hermes_cli.kanban_wait_fallback import fields
         fields(conn, task_id, decision)

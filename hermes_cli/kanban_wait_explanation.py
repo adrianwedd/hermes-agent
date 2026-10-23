@@ -39,3 +39,37 @@ def _recorded_resolvers(records, declared_resolver):
         if isinstance(value, str) and value.strip() and value != declared_resolver and value not in resolvers:
             resolvers.append(value)
     return resolvers
+
+
+def native_unblock_fields(conn, task_id, decision, wait):
+    """Report the existing operator transition for a proven block representation.
+
+    Migration conservatively represents ordinary blocks as attestations, but
+    that must not invent a receipt requirement when native unblock can retire
+    the representation. Use the mutation boundary's origin/ownership/shape
+    proof; neither a matching gate name nor wait-level provenance is enough.
+    """
+    from hermes_cli import kanban_db as kb
+
+    task = kb.get_task(conn, task_id)
+    if (task is None or task.status != "blocked" or task.block_kind == "explicit_stop"
+            or decision.get("workflow_stage") in {"HELD", "OPERATOR"}
+            or decision.get("administrative_pending")):
+        return
+    gate_ids = kb._releasable_block_representation(conn, task_id, wait)
+    if not gate_ids:
+        return
+    action = (
+        f"Operator: run hermes kanban --board <owning-board> unblock {task_id} "
+        "to release the native block; dependencies and other conditions are rechecked. "
+        "No new attestation is required for this migration-owned representation."
+    )
+    reason = "Native block awaits operator release through the supported unblock transition"
+    decision.update(
+        reason=reason, why_not_executable=reason, next_action=action,
+        current_next_action=action, current_unblock_action=action,
+        current_next_action_type="native_unblock", evaluation_mode="manual_transition",
+        resume_condition={"transition": "unblock", "gate_ids": gate_ids},
+        predicate={"evaluator": "native_unblock", "gate_ids": gate_ids},
+        owner="operator", resolver="operator",
+    )
