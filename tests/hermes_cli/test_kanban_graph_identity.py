@@ -23,6 +23,7 @@ def test_completed_decomposition_survives_retriage(tmp_path, monkeypatch):
         assert conn.execute("SELECT 1 FROM task_links WHERE parent_id=? AND child_id=?", (root, downstream)).fetchone()
         # Retention must not erase the identity of a completed fan-out.
         with kb.write_txn(conn):
+            kb._append_event(conn, root, "heartbeat", None)
             conn.execute("UPDATE tasks SET status='done' WHERE id=?", (root,))
             conn.execute("UPDATE task_events SET created_at=0 WHERE task_id=?", (root,))
         assert kb.gc_events(conn, older_than_seconds=1) > 0

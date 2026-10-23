@@ -57,7 +57,7 @@ def validate_contract(value):
     if (
         not isinstance(criteria, list)
         or not criteria
-        or any((not isinstance(c, str) or not c.strip() for c in criteria))
+        or any(not isinstance(c, str) or not c.strip() for c in criteria)
         or (len(set(criteria)) != len(criteria))
     ):
         raise ValueError("Declare distinct nonblank acceptance criterion IDs")
@@ -80,10 +80,8 @@ def validate_contract(value):
         if key in value and (
             not isinstance(value[key], list)
             or any(
-                (
-                    not isinstance(t, str) or not re.fullmatch("t_[0-9a-f]+", t)
-                    for t in value[key]
-                )
+                not isinstance(t, str) or not re.fullmatch("t_[0-9a-f]+", t)
+                for t in value[key]
             )
         ):
             raise ValueError(key + " must contain exact card IDs")
@@ -126,7 +124,7 @@ def set_requirements(
             raise RuntimeError(
                 "Card snapshot changed; reread before declaring completion requirements"
             )
-        if row[0] == "running" or any((row[i] is not None for i in (2, 3, 4))):
+        if row[0] == "running" or any(row[i] is not None for i in (2, 3, 4)):
             raise RuntimeError(
                 "Do not change requirements under an active worker owner"
             )
@@ -149,7 +147,7 @@ def _snapshot(conn, task_id):
         "SELECT status,current_run_id,assignee,completion_contract FROM tasks WHERE id=?",
         (task_id,),
     ).fetchone()
-    cid, contract = contract_record(conn, task_id)
+    cid, _contract = contract_record(conn, task_id)
     return tuple(row) + (cid,) if row is not None else None
 
 
@@ -297,7 +295,7 @@ def _durable_evidence(conn, task_id, cid, contract, metadata):
             and (x.get("satisfied") is True)
             and isinstance(x.get("artifact_ids"), list)
             and x["artifact_ids"]
-            and all((type(a) is int and a in artifacts for a in x["artifact_ids"]))
+            and all(type(a) is int and a in artifacts for a in x["artifact_ids"])
         ]
         if not matches:
             missing.append("Acceptance evidence missing for criterion " + criterion)
@@ -305,16 +303,14 @@ def _durable_evidence(conn, task_id, cid, contract, metadata):
         commands = evidence.get("commands")
         commands = commands if isinstance(commands, list) else []
         if not any(
-            (
-                isinstance(x, dict)
-                and isinstance(x.get("cmd"), str)
-                and x["cmd"].strip()
-                and (type(x.get("exit_code")) is int)
-                and (x["exit_code"] == 0)
-                and (type(x.get("output_attachment_id")) is int)
-                and (x["output_attachment_id"] in artifacts)
-                for x in commands
-            )
+            isinstance(x, dict)
+            and isinstance(x.get("cmd"), str)
+            and x["cmd"].strip()
+            and (type(x.get("exit_code")) is int)
+            and (x["exit_code"] == 0)
+            and (type(x.get("output_attachment_id")) is int)
+            and (x["output_attachment_id"] in artifacts)
+            for x in commands
         ):
             missing.append(
                 "A reproducible successful command and durable output attachment are required"
@@ -324,6 +320,13 @@ def _durable_evidence(conn, task_id, cid, contract, metadata):
 
 def _children_missing(conn, task_id, contract):
     missing = []
+    # Decomposition makes implementation children prerequisites of the program.
+    # Spec handoffs below point the other way: implementation follows the spec.
+    prerequisites = {
+        r[0] for r in conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id=?", (task_id,),
+        )
+    }
     linked = {
         r[0]
         for r in conn.execute(
@@ -334,7 +337,7 @@ def _children_missing(conn, task_id, contract):
         row = conn.execute("SELECT status FROM tasks WHERE id=?", (child,)).fetchone()
         _, child_contract = contract_record(conn, child)
         if (
-            child not in linked
+            child not in prerequisites
             or row is None
             or row[0] not in {"done", "archived"}
             or (not isinstance(child_contract, dict))
@@ -401,7 +404,7 @@ def _coding_missing(contract, evidence, status, force, assignee, api=None):
         not isinstance(branch, str)
         or not branch
         or any(
-            (x in branch for x in ["..", "@{", "\\", " ", ":", "?", "*", "[", "~", "^"])
+            x in branch for x in ["..", "@{", "\\", " ", ":", "?", "*", "[", "~", "^"]
         )
     ):
         missing.append("Coding delivery requires a valid published branch")
@@ -507,10 +510,8 @@ def prepare_gate(
             ],
             expected_snapshot=snapshot,
         )
-    from hermes_cli.kanban_decision import _external_condition_state
-    terminal_conditions = _external_condition_state(conn, task_id, cid, {
-        "external_conditions": contract.get("completion_conditions") or [],
-    })
+    from hermes_cli.kanban_completion_conditions import condition_state
+    terminal_conditions = condition_state(conn, task_id, cid, contract, "completion_conditions")
     unmet = [condition for condition in terminal_conditions if not condition["satisfied"]]
     if unmet:
         _refuse(conn, task_id, ["Original-scope completion condition remains unmet: " + str(condition.get("requirement")) for condition in unmet], expected_snapshot=snapshot)

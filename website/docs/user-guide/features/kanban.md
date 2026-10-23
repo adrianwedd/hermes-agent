@@ -832,13 +832,19 @@ Visually the target is the familiar Linear / Fusion layout: dark theme, column h
 
 The kanban board has two ways to handle a task you drop into the Triage column:
 
-**Auto (default)** — `kanban.auto_decompose: true`. The gateway-embedded dispatcher runs the **decomposer** on each tick, capped by `kanban.auto_decompose_per_tick` (default 3 tasks per tick) so a bulk-load of triage tasks doesn't burst-spend the auxiliary LLM. The decomposer uses the built-in decomposition prompt plus the `auxiliary.kanban_decomposer` model path, reads your installed profiles + their descriptions, and asks the LLM to produce a JSON task graph: which tasks to spawn, who they go to, and which depend on which. The original triage task becomes the parent of every leaf in the graph, so it stays alive until the whole graph completes - and then promotes back to `ready` so its assignee (`kanban.orchestrator_profile`, else the assignee the task already had, else the active default profile) can judge completion and add more tasks if the work isn't done. This is the "drop a one-liner, walk away" flow.
+**Auto (default)** — `kanban.auto_decompose: true`. The gateway-embedded dispatcher runs the **decomposer** on each tick, capped by `kanban.auto_decompose_per_tick` (default 3 tasks per tick) so a bulk-load of triage tasks doesn't burst-spend the auxiliary LLM. The decomposer uses the built-in decomposition prompt plus the `auxiliary.kanban_decomposer` model path, reads your installed profiles + their descriptions, and asks the LLM to produce a JSON task graph: which tasks to spawn, who they go to, and which depend on which. The original triage task depends on every child in the graph, so it stays alive until the whole graph completes - and then promotes back to `ready` so its assignee (`kanban.orchestrator_profile`, else the assignee the task already had, else the active default profile) can judge completion and add more tasks if the work isn't done. This is the "drop a one-liner, walk away" flow.
 
 A completed built-in fan-out is recorded atomically with its child graph. Moving
 that root back to Triage does not create another graph; ordinary prerequisite
 links do not prevent a task's first decomposition. The completion marker survives
 event retention until the task is deleted. This is not semantic deduplication of
 independently created manual graphs, nor a repair for previously pruned history.
+
+Dependency edges point from each implementation child to the programme that
+waits for it. A programme's `required_children` completion contract checks those
+incoming prerequisites; an unfinished child prevents programme completion.
+Spec `handoff_children` use the opposite direction: implementation follows the
+specification rather than being a prerequisite for writing it.
 
 When a new task omits its tenant, creation inherits the first nonempty tenant
 among its parents, in supplied order. An explicit tenant (including the worker's
@@ -1029,11 +1035,19 @@ hermes kanban notify-unsubscribe <id>
 hermes kanban context <id>                             # what a worker sees
 hermes kanban specify [<id> | --all] [--tenant T]      # flesh out a triage-column idea
         [--author NAME] [--json]                       #   into a full spec and promote to todo
-hermes kanban gc [--event-retention-days N]            # workspaces + old events + old logs
+hermes kanban gc [--event-retention-days N]            # workspaces + disposable liveness events + old logs
         [--log-retention-days N]                       #   (negative N is rejected; 0 disables that sweep)
 ```
 
 All commands are also available as a slash command in the interactive CLI and in the messaging gateway (see [`/kanban` slash command](#kanban-slash-command) below).
+
+Event retention removes only old heartbeat events without a payload on Done or
+Archived tasks. Heartbeat notes and workflow events remain until explicit task
+deletion: contracts, acceptance receipts, dependency evidence, hold declarations
+and their releases are authoritative state, including when another card refers
+to them. Unknown event types are retained. Collection does not reconstruct
+previously deleted events. Workspace and worker-log collection are separate
+sweeps; their retention behaviour is unchanged.
 
 `--max-retries` is a per-task circuit-breaker override for the dispatcher. `--max-retries 1` blocks the task on the first non-successful attempt, while `--max-retries 3` allows two retries and blocks on the third failure. Omit it to use `kanban.failure_limit` from `config.yaml`, then the built-in default.
 

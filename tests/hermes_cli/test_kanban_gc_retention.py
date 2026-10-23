@@ -21,13 +21,14 @@ def board(tmp_path, monkeypatch):
 def _done_task_with_old_event(conn):
     tid = kb.create_task(conn, title="finished")
     with kb.write_txn(conn):
+        kb._append_event(conn, tid, "heartbeat", None)
         conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
         conn.execute("UPDATE task_events SET created_at=0 WHERE task_id=?", (tid,))
     return tid
 
 def _event_rows(conn, tid):
     return conn.execute(
-        "SELECT count(*) FROM task_events WHERE task_id=?", (tid,)
+        "SELECT count(*) FROM task_events WHERE task_id=? AND kind='heartbeat'", (tid,)
     ).fetchone()[0]
 
 def _old_log_file() -> Path:

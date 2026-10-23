@@ -2825,19 +2825,10 @@ def close_task(
     with write_txn(conn):
         # Read acceptance under the write lock; a concurrent contract edit must
         # not slip between this gate and Done. Do not run the worker manifest gate.
-        from hermes_cli.kanban_decision import _external_condition_state
-        from hermes_cli.kanban_wait_contract import condition_digest
+        from hermes_cli.kanban_completion_conditions import condition_state
         cid, current_contract = contract_record(conn, task_id)
         for field in ("external_conditions", "completion_conditions"):
-            declared = (current_contract or {}).get(field) or []
-            wait = (current_contract or {}).get("wait_contract") or {}
-            # Terminal conditions use the same receipts, but their current
-            # content must also match: an old approval cannot satisfy a revision.
-            gates = [g for g in wait.get("gates", []) if not g["parameters"].get("native_condition_sha256")
-                     or any(g["parameters"]["native_condition_sha256"] == condition_digest(c) for c in declared)]
-            conditions = _external_condition_state(conn, task_id, cid, {
-                "external_conditions": declared, "wait_contract": {**wait, "gates": gates},
-            })
+            conditions = condition_state(conn, task_id, cid, current_contract, field)
             unmet = [c for c in conditions if not c["satisfied"]]
             if unmet:
                 raise OperatorCloseRefused(
@@ -4433,7 +4424,11 @@ def _retention_seconds(older_than_seconds: int) -> int:
 
 
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Prune old done/archived events, retaining decomposition identity until task deletion.
+    """Prune only old, note-free liveness events on done/archived tasks.
+
+    Events also store authoritative contracts, decisions and cross-task evidence
+    references. Terminal status does not make those disposable. Preserve unknown
+    kinds by default, and keep heartbeat notes because they can describe work.
 
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--event-retention-days 0`` to "disabled" before calling this.
@@ -4441,7 +4436,8 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind NOT IN ('decomposed','administrative_pending') AND task_id IN "
+            "DELETE FROM task_events WHERE created_at < ? AND kind='heartbeat' "
+            "AND payload IS NULL AND task_id IN "
             "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)
