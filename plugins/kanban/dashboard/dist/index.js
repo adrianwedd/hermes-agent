@@ -3392,6 +3392,7 @@
 
   function InlineCreate(props) {
     const { t } = useI18n();
+    const [decomposable, setDecomposable] = useState(false);
     const [title, setTitle] = useState("");
     const [assignee, setAssignee] = useState("");
     const [priority, setPriority] = useState(0);
@@ -3422,6 +3423,7 @@
         triage: props.columnName === "triage",
       };
       if (parent) body.parents = [parent];
+      if (body.triage && decomposable) body.decomposition = { decomposable: true };
       // Parse comma-separated skills into a clean list. Blank = no
       // extras (omit key so backend leaves it null). The dispatcher
       // always auto-loads kanban-worker; these are extras on top.
@@ -3446,6 +3448,7 @@
       }
       props.onSubmit(body);
       setTitle(""); setAssignee(""); setPriority(0); setParent(""); setSkills("");
+      setDecomposable(false);
       setWorkspaceKind(defaultWorkspaceKind); setWorkspacePath(defaultWorkspacePath);
       setGoalMode(false); setGoalMaxTurns("");
     };
@@ -3474,6 +3477,10 @@
           tx(t, "newTaskTitle", "New task — {column}",
             { column: getColumnLabel(t, props.columnName) || props.columnName })),
         h("div", { className: "flex flex-col gap-3" },
+          props.columnName === "triage" ? h("label", { className: "flex items-center gap-2 text-sm" },
+            h("input", { type: "checkbox", checked: decomposable,
+              onChange: function (e) { setDecomposable(e.target.checked); } }),
+            tx(t, "decompositionSafe", "I authorise worker decomposition: no approval or external gate is required")) : null,
           h("div", { className: "flex flex-col gap-1" },
             fieldLabel(tx(t, "taskTitleLabel", "Title")),
             h("textarea", {

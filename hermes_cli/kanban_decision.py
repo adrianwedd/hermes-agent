@@ -407,6 +407,7 @@ def decide(conn, task: Any, *, status_override: str | None = None, _wait_project
         "accepted_completed_actions": accepted,
         "accepted_evidence_identities": evidence_identities,
         "remaining_required_actions": remaining,
+        "selected_next_action": selected,
         "current_next_action": selected.get("action"),
         "current_next_action_type": selected.get("type"),
         "worker_executable_now": False,
@@ -529,6 +530,12 @@ def decide(conn, task: Any, *, status_override: str | None = None, _wait_project
     from hermes_cli.kanban_wait_contract import decision_fields
     if status not in TERMINAL_STATUSES and not active:
         decision_fields(conn, task_id, decision, wait_override=native_wait)
+        # A worker requirement cannot override selected-action authority, nor
+        # authority/gates added after the action reducer by native projection.
+        from hermes_cli.kanban_decomposition_safety import decision_boundary_refusal
+        if (decision['workflow_stage'] != 'TRIAGE' or decision.get('remaining_gates')
+                or decision_boundary_refusal(decision)):
+            decision['auto_decompose_allowed'] = False
         if _predict:
             from hermes_cli.kanban_wait_prediction import predict
             decision["state_if_satisfied_now"] = predict(conn, task, decision, native_wait)

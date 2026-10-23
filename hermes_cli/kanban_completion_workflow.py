@@ -3,7 +3,7 @@ import hashlib
 import json
 
 
-def ensure_scope_contract(conn, task_id, *, authority='control_plane'):
+def ensure_scope_contract(conn, task_id, *, authority='control_plane', decomposition=None):
     """Materialise a deterministic v1 contract from the already-authoritative card.
 
     This is bookkeeping, not a new acceptance decision. It is safe only while
@@ -70,6 +70,14 @@ def ensure_scope_contract(conn, task_id, *, authority='control_plane'):
             'required_authority': None,
         },
     }
+    if row[2] == 'triage' and decomposition is not None:
+        # Only a caller's explicit declaration authorises decomposition. Scope
+        # prose (including the descriptive kind above) is never authority.
+        contract['remaining_required_actions'] = [{
+            'action': scope, 'requirement_id': task_id + ':scope',
+            **decomposition,
+        }]
+        contract['selected_next_action'] = {}
     if existing_wait:
         contract['wait_contract'] = existing_wait
     kb._append_event(conn, task_id, 'completion_requirements', contract)

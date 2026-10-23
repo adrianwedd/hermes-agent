@@ -628,6 +628,7 @@ function NewTaskDialog({
   const boardDefaultDir = currentBoard?.default_workdir || ''
 
   const isTriage = target === 'triage'
+  const [decomposable, setDecomposable] = useState(false)
   const [title, setTitle] = useState('')
   const [bodyText, setBodyText] = useState('')
   const [assignee, setAssignee] = useState('')
@@ -664,6 +665,7 @@ function NewTaskDialog({
   useEffect(() => {
     if (target) {
       setTitle('')
+      setDecomposable(false)
       setBodyText('')
       setAssignee('')
       setPriority('0')
@@ -706,6 +708,7 @@ function NewTaskDialog({
         skills: skillList.length ? skillList : undefined,
         title: trimmed,
         triage: isTriage,
+        decomposition: isTriage && decomposable ? { decomposable: true } : undefined,
         workspace_kind: workspaceKind,
         ...overrideCreateFields(modelOverride),
         // Empty → backend inherits the board's default project dir.
@@ -844,6 +847,12 @@ function NewTaskDialog({
             </Field>
           )}
 
+          {isTriage && (
+            <label className="flex cursor-pointer items-center gap-2 text-[0.75rem] text-(--ui-text-secondary)">
+              <Switch aria-label={k.decompositionSafe} checked={decomposable} onCheckedChange={setDecomposable} size="xs" />
+              {k.decompositionSafe}
+            </label>
+          )}
           <label className="flex cursor-pointer items-center gap-2 text-[0.75rem] text-(--ui-text-secondary)">
             <Switch aria-label={k.goalMode} checked={goalMode} onCheckedChange={setGoalMode} size="xs" />
             {k.goalMode}

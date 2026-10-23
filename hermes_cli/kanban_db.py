@@ -4179,6 +4179,10 @@ def specify_triage_task(
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
         from hermes_cli.kanban_completion_workflow import operator_contract_pending
+        if author == 'auto-decomposer':
+            from hermes_cli.kanban_decomposition_safety import check_and_record
+            if not check_and_record(conn, task_id)[0]:
+                return False
         if operator_contract_pending(conn, task_id):
             return False
         existing = conn.execute(

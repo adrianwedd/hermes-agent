@@ -84,6 +84,7 @@ type KanbanMessages = {
   parent: string
   noParent: string
   goalMode: string
+  decompositionSafe: string
   creating: string
   createTask: string
   cancel: string
@@ -320,6 +321,7 @@ export const en: KanbanMessages = {
   parent: "Parent (blocks until it's done)",
   noParent: '— no parent —',
   goalMode: "Goal mode (worker loops until a judge agrees it's done)",
+  decompositionSafe: 'I authorise worker decomposition: no approval or external gate is required',
   creating: 'Creating…',
   createTask: 'Create task',
   cancel: 'Cancel',
@@ -557,6 +559,7 @@ const ja: KanbanMessages = {
   parent: '親（完了するまでブロック）',
   noParent: '— 親なし —',
   goalMode: 'ゴールモード（ジャッジが完了と認めるまでワーカーがループ）',
+  decompositionSafe: 'ワーカーによる分解を許可：承認や外部条件は不要です',
   creating: '作成中…',
   createTask: 'タスクを作成',
   cancel: 'キャンセル',
@@ -792,6 +795,7 @@ const zh: KanbanMessages = {
   parent: '父任务（完成前会阻塞）',
   noParent: '— 无父任务 —',
   goalMode: '目标模式（工作单元循环直到评判代理认可完成）',
+  decompositionSafe: '我授权工作单元拆分任务：无需审批或满足外部条件',
   creating: '创建中…',
   createTask: '创建任务',
   cancel: '取消',
@@ -1025,6 +1029,7 @@ const zhHant: KanbanMessages = {
   parent: '父任務（完成前會阻擋）',
   noParent: '— 無父任務 —',
   goalMode: '目標模式（工作單元循環直到評判代理認可完成）',
+  decompositionSafe: '我授權工作單元拆分任務：無需審批或滿足外部條件',
   creating: '建立中…',
   createTask: '建立任務',
   cancel: '取消',

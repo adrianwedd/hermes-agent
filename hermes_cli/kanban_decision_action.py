@@ -88,10 +88,10 @@ def triage_action(conn, t, decision, selected, remaining, evidence_identities):
         and selected.get("type") == "worker_action"
         and str(requirement).strip() == str(selected.get("action") or "").strip()
     )
-    safely_decomposable = bool(
-        requirement_data.get("worker_executable") is True
-        or requirement_data.get("decomposable") is True
-        or deterministic_scope
+    from hermes_cli.kanban_decomposition_safety import boundary_refusal, requirement_refusal
+    safely_decomposable = (
+        requirement_refusal(requirement_data) is None
+        or (deterministic_scope and boundary_refusal(selected) is None)
     )
     decision.update(workflow_stage="TRIAGE", reason="The next required action is unknown" if unknown else "Triage controller assesses bounded scope",
                     owner=t.get("assignee") or "triage controller",

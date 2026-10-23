@@ -316,18 +316,11 @@ def decompose_task(
         return DecomposeOutcome(task_id, False, reason)
 
     if author == "auto-decomposer":
-        from hermes_cli.kanban_decision import auto_decompose_allowed, record_decision
-        with kbc.connect_closing() as conn:
-            allowed, decision = auto_decompose_allowed(conn, task)
+        from hermes_cli.kanban_decomposition_safety import check_and_record
+        with kbc.connect_closing() as conn, kb.write_txn(conn):
+            allowed, reason = check_and_record(conn, task_id)
             if not allowed:
-                from hermes_cli.kanban_db_connect import write_txn
-                with write_txn(conn):
-                    record_decision(conn, task_id, decision, "no_worker_executable_action")
-                return DecomposeOutcome(
-                    task_id, False,
-                    f"canonical {decision['workflow_stage']} decision forbids auto-decomposition: "
-                    f"{decision['reason']}",
-                )
+                return DecomposeOutcome(task_id, False, reason)
 
     routing = _load_routing(root_assignee=task.assignee)
     raw, reason = _call_aux(
@@ -356,5 +349,10 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-        from hermes_cli.kanban_decision import auto_decompose_allowed
-        return [row.id for row in rows if auto_decompose_allowed(conn, row)[0]]
+        from hermes_cli.kanban_decomposition_safety import check_and_record
+        eligible = []
+        for row in rows:
+            with kb.write_txn(conn):
+                if check_and_record(conn, row.id)[0]:
+                    eligible.append(row.id)
+        return eligible

@@ -114,6 +114,10 @@ def decompose_triage_task(
     # (create_task, link_tasks, add_comment) must not be called in here.
     now = int(time.time())
     with write_txn(conn):
+        if author == 'auto-decomposer':
+            from hermes_cli.kanban_decomposition_safety import check_and_record
+            if not check_and_record(conn, task_id)[0]:
+                return None
         from hermes_cli.kanban_completion_workflow import operator_contract_pending
         if operator_contract_pending(conn, task_id):
             return None

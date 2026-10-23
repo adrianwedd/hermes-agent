@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterator, Optional
 from fastapi import (
     APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_workflow
@@ -441,6 +441,15 @@ def get_task(
 
 # --- POST /tasks ------------------------------------------------------------
 
+class DecompositionDeclaration(BaseModel):
+    """Operator declaration, never inferred from a card's title or body."""
+
+    model_config = {"extra": "forbid"}
+    decomposable: Optional[StrictBool] = None
+    required_authority: Optional[str] = None
+    gate_id: Optional[str] = None
+
+
 class CreateTaskBody(BaseModel):
     title: str
     body: Optional[str] = None
@@ -451,6 +460,7 @@ class CreateTaskBody(BaseModel):
     workspace_path: Optional[str] = None
     parents: list[str] = Field(default_factory=list)
     triage: bool = False
+    decomposition: Optional[DecompositionDeclaration] = None
     idempotency_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[str]] = None
@@ -465,8 +475,15 @@ class CreateTaskBody(BaseModel):
 @router.post("/tasks")
 def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     with _board_conn(board) as (board, conn), _value_error_400():
-        # CreateTaskBody field names match create_task's keyword parameters.
-        task_id = kanban_db.create_task(conn, created_by="dashboard", board=board, **payload.model_dump())
+        from hermes_cli.kanban_completion_workflow import ensure_scope_contract
+        # Creation and the explicit declaration are one publication boundary.
+        # An idempotent retry must never replace an existing contract.
+        with kanban_db.write_txn(conn):
+            task_id = kanban_db.create_task(conn, created_by="dashboard", board=board,
+                                          **payload.model_dump(exclude={"decomposition"}))
+            if payload.triage:
+                ensure_scope_contract(conn, task_id, authority="dashboard_operator_creation",
+                                      decomposition=payload.decomposition.model_dump() if payload.decomposition else {})
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(
             task, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)
