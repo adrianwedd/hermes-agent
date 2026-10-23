@@ -5567,6 +5567,11 @@ def get_available_vision_backends() -> list[str]:
             main_ok = resolve_provider_client(main_provider, _read_main_model())[0] is not None
         if main_ok:
             available.append(main_provider)
+    # Same boundary as runtime auto-routing: listing "whatever else is logged in" behind a
+    # selected main provider gates tools (and setup summaries) on accounts the session never
+    # pointed at. Discovery enumeration is only for installs with no selected provider.
+    if not _discovery_chain_allowed(main_provider, "vision"):
+        return available
     for p in _VISION_AUTO_PROVIDER_ORDER:  # skip if already covered by main provider
         if p not in available and _resolve_strict_vision_backend(p)[0] is not None:
             available.append(p)
