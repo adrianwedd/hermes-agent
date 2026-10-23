@@ -451,7 +451,7 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
 
 def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Trailing run outcomes show >= cfg["crash_threshold"] (default 2)
-    consecutive ``crashed`` with no ``completed``/``reclaimed`` between. Fires
+    consecutive ``crashed`` with no successful handoff or reclaim between. Fires
     earlier than ``repeated_failures`` for a crash-specific heads-up and
     suppresses itself when the unified rule is about to fire.
 
@@ -466,7 +466,9 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
 
     threshold = int(cfg.get("crash_threshold", 2))
     # Count trailing consecutive 'crashed' outcomes; a success (or manual
-    # reclaim) breaks the streak, other outcomes neither count nor break it.
+    # reclaim or review handoff) breaks the streak, other outcomes neither count
+    # nor break it. A review_requested run has advanced the card to review;
+    # older crashes are history, not a current failure to retry.
     consecutive = 0
     last_err = None
     for r in _runs_newest_first(runs):
@@ -475,8 +477,28 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
             consecutive += 1
             if last_err is None:
                 last_err = _task_field(r, "error")
-        elif outcome in {"completed", "reclaimed"}:
+        elif outcome in {"completed", "reclaimed", "review_requested"}:
             break
+    # An explicit Ready -> Review handoff can append review_requested without
+    # synthesizing a run (no summary/metadata). The event is still the durable
+    # transition. Count only crashes after that handoff; older run outcomes are
+    # historical even when no review_requested run exists.
+    crashes_since_review = 0
+    # list_events orders by second-resolution wall time, which can move
+    # backwards. Event ids are the durable insertion order; fixture events
+    # without ids retain their caller-provided order.
+    ordered_events = (
+        sorted(events, key=lambda event: int(_task_field(event, "id")))
+        if events and all(_task_field(event, "id") is not None for event in events)
+        else events
+    )
+    for event in reversed(ordered_events):
+        kind = _event_kind(event)
+        if kind == "review_requested":
+            consecutive = min(consecutive, crashes_since_review)
+            break
+        if kind in {"crashed", "protocol_violation"}:
+            crashes_since_review += 1
     if consecutive < threshold:
         return []
     task_id = _task_field(task, "id")
@@ -629,7 +651,15 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
     ``_rule_stuck_in_blocked`` resets its timer on any ``commented`` / ``unblocked`` event, so a task that
     cycles every few minutes is invisible to it regardless of how many times it cycles (#29747 gap 1). This
     rule complements that one by counting block→unblock cycles in a sliding window.
-    """
+
+    Exempt: done/archived — a finished card cannot be blocked again, so the
+    window's cycles are frozen history about work that is over. Rendered as a
+    red fault badge on a completed tile they read as a live problem (the
+    operator's "completed cards must not show stale warnings" contract), and
+    the same reasoning already exempts them from ``_rule_repeated_failures``
+    and ``_rule_repeated_crashes``."""
+    if _task_field(task, "status") in ("done", "archived"):
+        return []
     threshold = _positive_int(cfg.get("block_cycle_threshold"), 3)
     window_seconds = float(cfg.get("block_cycle_window_seconds", 24 * 3600))
     cycle_cutoff = now - window_seconds
@@ -888,7 +918,20 @@ def compute_task_diagnostics(
     graph: Optional[dict] = None,
 ) -> list[Diagnostic]:
     """Run every rule for one task; critical first, then error, warning; ties
-    broken by most-recent ``last_seen_at``."""
+    broken by most-recent ``last_seen_at``.
+
+    Exempt: done/archived. A finished card is a resolution, not a live distress
+    signal — it cannot be blocked, fail or strand again — so every diagnostic is
+    frozen history and must not reach a consumer that renders it as a current
+    fault (the operator's "completed cards must not show stale progress or red
+    warnings" contract). Applied HERE, once, rather than per rule: the class was
+    reopened twice by rules that forgot the check (``block_unblock_cycling``,
+    ``prose_phantom_refs``, ``hallucinated_cards``), and a single gate at the
+    engine means no future rule can reintroduce it. Callers that need the
+    historical record read the event log, not this function.
+    """
+    if _task_field(task, "status") in ("done", "archived"):
+        return []
     now_ts = int(now if now is not None else time.time())
     config = config or {}
     cfg = {**DEFAULT_CONFIG, **config}

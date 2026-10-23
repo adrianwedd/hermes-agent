@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "kind": "implementation",
+  "local_only": true,
+  "qualified_for_dispatch": true,
+  "require_commands": true,
+  "require_review": true,
+  "require_pr": false,
+  "require_issue": false,
+  "criteria": [
+    "priority_edit_after_creation_native_persist_and_readback",
+    "original_all_state_dispatch_explanation",
+    "terminal_resolution_without_stale_progress_or_queue_warning",
+    "exact_operator_wait_and_fault_reason",
+    "truthful_per_run_model_provenance",
+    "dashboard_regression_tests",
+    "served_ui_verification"
+  ],
+  "scope": "Goal: make the dashboard and board status truthful about what the dispatcher will actually do.\n\nInput: the implemented state machine and dispatcher from task 1.\n\nImplement:\n- dispatch_eligible and board status must explain the concrete next action the dispatcher will take, not just a boolean.\n- Completed cards must not show stale progress or red 'not queued' warnings.\n- Cards in PREPARE/READY/REVIEW must show as dispatchable when capacity exists.\n- Cards in OPERATOR must show the exact operator decision required.\n- Cards in WAITING/BLOCKED must show the known future condition or genuine external blocker.\n- Configured provider/model information must not be presented as observed execution.\n\nAdd/update tests for the dashboard/status rendering.\n\nAcceptance: for each canonical state, the dashboard shows an accurate, non-misleading status; no stale warnings on completed cards; tests cover the rendering paths.",
+  "original_body_sha256": "b5c072c2c6bc06c8b147ce26edc864b15c58256dbb918d2dac987ba5a9b5a153",
+  "authority": "Existing explicit user-created t_9338cb9c full repair and latest instruction to progress existing authorised cards. Source-only isolated implementation; root is sole installed-source integration/activation owner. No final acceptance waived.",
+  "preparation": {
+    "mode": "automatic",
+    "state": "qualified",
+    "grant_qualification": true,
+    "isolated_workspace": true,
+    "project_id": "p_a64ab08b",
+    "workspace_path": "/Users/adrian/.hermes/kanban/workspaces/t_e5d24de5/owned-hermes-source-20261006",
+    "source_revision": "e26a04ed82f15ffd394f2006bee7957ccc145d29",
+    "scope_digest": "71344b8c8fe34f4a57d66e6bf99e092e3d1ec57f17412861b9c297299675f622",
+    "source_contract_event": 10180
+  },
+  "remaining_required_actions": [
+    "Apply only the reviewer-requested correction: Round 5 (contract lens): one blocking, tightly-scoped rendering defect; every other acceptance clause independently reproduced as correct. Full evidence in comment 1312.\n\nMUST-FIX \u2014 a completed card still paints a fault section in the BROWSER/MOBILE drawer. The handoff's central claim (\"the rest of _RULES already had\" the terminal guard, \"so no renderer can disagree with another\") is false: two sibling rules in _RULES still have no terminal guard, and both are reachable on a finished card.\n\n- _rule_prose_phantom_refs (kanban_diagnostics.py:344): _flag_phantom_prose_refs runs AFTER the `completed` event is appended (kanban_db.py:2871-2876), so the flag is ACTIVE on a done card. Proven through the production API: kb.complete_task(summary=\"done; see t_deadbeef\") -> status done, served warnings {kinds:{prose_phantom_refs:1}}.\n- _rule_hallucinated_cards (kanban_diagnostics.py:256): a blocked completion writes completion_blocked_hallucination, and archive_task appends only `archived`, which _active_hallucination_events does NOT treat as clearing. -> archived card, drawer warnings {kinds:{hallucinated_cards:1}, highest_severity:'error'}.\n\nThe desktop drawer IS gated (drawer.tsx:1125 `!terminal`); the shipped browser/mobile IIFE is NOT: plugins/kanban/dashboard/dist/index.js:4135 calls DiagnosticsSection with `t.diagnostics || []` and DiagnosticsSection (line 1831) has no terminal check. Driving the bundle's REAL DiagnosticsSection (brace-matched, not regex): done+warning -> rendered; archived+error -> rendered. Same for the CLI: hermes_cli/kanban.py:532 prints unconditionally. The predicate the handoff points at as its single source of truth is itself asymmetric: _compute_task_diagnostics(task_ids=None) filters `status != 'archived'`, while the task_ids=[id] path used by /tasks/:id and the CLI applies NO status filter.\n\nIdentical on the unpatched base tree \u2014 inherited, not introduced \u2014 but round 4 made the sibling _rule_block_unblock_cycling blocking on exactly that reasoning (\"it is base behaviour, but the card's acceptance names it explicitly\"), and the acceptance says \"no stale warnings on completed cards\" + \"tests cover the rendering paths\". Note honestly: no live card carries either event kind (0/215), so the served board is truthful today; this is a reachable path, not a currently-visible defect.\n\nMINIMUM OUTCOME:\n1. Close the class at the source of truth (as round 4 prescribed): give _rule_prose_phantom_refs and _rule_hallucinated_cards the terminal guard their siblings carry, OR apply one terminal exemption in compute_task_diagnostics so no future rule can reintroduce it. Do not add a third classifier.\n2. Correct the handoff claim: the guard is not what the rest of _RULES had, and the backend does not withhold the rollup for terminal statuses on the /tasks/:id path.\n3. Add a rendering test for the browser/mobile drawer path (the bundle's DiagnosticsSection, or a served-payload assertion on /tasks/:id), proven red on base like the rest of this patch.\n\nPRESERVE (independently reproduced as correct, do not rework): patch identity 11/11 byte-for-byte against the CURRENT installed tree; the derived-stage truth table across all canonical states (my own 34-check contract probe, 0 failures \u2014 READY/PREPARE/OPERATOR/WAITING/BLOCKED/HELD/REVIEW/DONE/ARCHIVED + provenance); the block_unblock_cycling terminal guard with its control arm (r5 done->[], base done->['block_unblock_cycling']; live payload 0 vs 1 terminal card with diagnostics); the desktop cardIsTerminal gate at all three call sites; the bundle isTerminalCard/warningBadge/collectDiagTasks gates; card_facts.progress withheld for terminal; the 14 locale keys; both build gates (tsc -p tsconfig.app.json AND tsc -b -> exit 0 on r5 and pristine control); the honest Configured-route provenance wording.\n\nTARGET IS STABLE AND THE BASELINE IS RIGHT: snapshot 63f5e0ea45 pins 749 files, 0 missing / 0 differing now; installed HEAD unmoved; last kanban write 01:45:33, before the r5 tree was built. The patch applies cleanly to a pristine copy of the CURRENT installed tree (exit 0, 0 rejects) and reproduces the r5 tree 11/11. Whole-tree classification shows no undeclared source drift. 85-file kanban sweep r5 vs pristine control: 43 vs 44 failures, comm -23 -> ZERO r5-unique failures.\n\nRoot still owns install/activation and authenticated served desktop+browser verification. Reviewer edited no implementation file; deliverable re-hashed after every run (11/11, 0 mismatches); live DB opened mode=ro only, still 215 cards, 0 probe rows."
+  ],
+  "selected_next_action": {
+    "phase": "READY",
+    "type": "worker_action",
+    "action": "Root integration: establish current candidate containing accepted r6 correction (reviewer run 787/comment 1445) and fix/kanban-quiet-truthful-dispatch fd73747586e17c56c76e77cc17e8da0c0e5f39ef; guardedly integrate/activate, perform authenticated browser/mobile and desktop served UI verification required by contract 16401, record evidence, then reconcile closure. Do not redo Round-5 correction or accepted r6 review.",
+    "required_authority": null
+  },
+  "wait_contract": {
+    "owned_block_event": 17668,
+    "version": 1,
+    "gates": [
+      {
+        "id": "retry-budget",
+        "revision": 1,
+        "declaration": "4d0ad466f490acc786050179f23e6486041a1d2e53d6a16857e22c08e824889c",
+        "evaluator": "retry_budget",
+        "parameters": {
+          "counter": "tasks.consecutive_failures",
+          "limit": "tasks.max_retries or latest wait_runtime_policy.failure_limit"
+        },
+        "resolver": "dispatcher",
+        "stage": "BLOCKED",
+        "reason": "Current failure budget prevents another attempt",
+        "current_unblock_action": "Repair the failure or change the authorised retry policy; counters remain intact",
+        "wake_trigger": [
+          "dispatcher_tick",
+          "restart_reconciliation",
+          "wait_gate_satisfied",
+          "wait_gate_invalidated"
+        ]
+      }
+    ],
+    "continuation": {
+      "state": "todo",
+      "selected_next_action": {
+        "phase": "READY",
+        "type": "worker_action",
+        "action": "Root integration: establish current candidate containing accepted r6 correction (reviewer run 787/comment 1445) and fix/kanban-quiet-truthful-dispatch fd73747586e17c56c76e77cc17e8da0c0e5f39ef; guardedly integrate/activate, perform authenticated browser/mobile and desktop served UI verification required by contract 16401, record evidence, then reconcile closure. Do not redo Round-5 correction or accepted r6 review.",
+        "required_authority": null
+      }
+    },
+    "provenance": {
+      "source_contract_event": 18063,
+      "migration": "native-marker-only-v1",
+      "substantive_conditions_satisfied": false
+    },
+    "owned_fields": [
+      "status",
+      "block_kind",
+      "dispatch_eligible"
+    ]
+  }
+}

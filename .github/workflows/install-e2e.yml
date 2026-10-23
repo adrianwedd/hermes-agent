@@ -326,7 +326,9 @@ jobs:
 
   macos:
     name: ${{ matrix.name }}
-    if: needs.generate-matrix.outputs.macos-legs != '0'
+    # Native macOS acceptance remains available by explicit dispatch or from
+    # the release controller, not automatic PR/scheduled CI.
+    if: needs.generate-matrix.outputs.macos-legs != '0' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
     needs: generate-matrix
     strategy:
       fail-fast: false

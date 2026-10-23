@@ -11,8 +11,8 @@ assumed its result" (M3). These tests pin:
   (the same helper the reclaim paths use),
 * ``consecutive_failures`` resets to 0 (deliberate operator action —
   opposite of the review-loop rule pinned in M2), and
-* the dashboard ``_set_status_direct`` reopen path and the DB function
-  produce identical descendant outcomes.
+* the dashboard refuses generic terminal reopening; only an explicitly
+  authorised domain transition may invoke the invalidation function.
 """
 
 from __future__ import annotations
@@ -91,9 +91,16 @@ def test_reopen_demotes_done_descendants_with_events_and_comments(conn):
     assert result["terminations"] == []
 
 
-def test_running_descendant_event_precedes_termination_via_reclaim_helper(
+def test_running_descendant_is_held_then_released_once_its_worker_dies(
     conn, tmp_path, monkeypatch,
 ):
+    """A running descendant must never be released before its worker is gone.
+
+    The invalidation records the hold in full (audit before death) and leaves the
+    claim, pid and run EXACTLY as found, so no claim can be granted beside a survivor.
+    Only the post-commit finalize kills the worker and, once it is confirmed dead,
+    retracts the card to ``todo`` with a ``descendant_reclaimed`` event.
+    """
     parent_id = kb.create_task(conn, title="ancestor", assignee="planner")
     assert kb.complete_task(conn, parent_id, result="done")
     child_id = kb.create_task(
@@ -102,36 +109,127 @@ def test_running_descendant_event_precedes_termination_via_reclaim_helper(
     claimed = kb.claim_task(conn, child_id)
     assert claimed is not None and claimed.status == "running"
     kbd._set_worker_pid(conn, child_id, 424242)
+    row = conn.execute(
+        "SELECT claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?", (child_id,)
+    ).fetchone()
+    lock, pid, fp = row["claim_lock"], row["worker_pid"], row["worker_started_at"]
 
     kills: list[tuple] = []
 
-    def fake_terminate(pid, claim_lock, started_at=None, **kwargs):
-        # The audit trail must already be durable when the kill fires:
-        # standalone calls commit before terminating.
+    def dead_terminate(pid_arg, claim_lock, started_at=None, **kwargs):
+        # The audit trail must already be durable when the kill fires.
         side = kbc.connect(tmp_path / "kanban.db")
         try:
             kinds = [e.kind for e in kb.list_events(side, child_id)]
         finally:
             side.close()
         assert "descendant_invalidated" in kinds
-        kills.append((pid, claim_lock, started_at))
-        return {"terminated": True}
+        kills.append((pid_arg, claim_lock, started_at))
+        return {"prev_pid": pid_arg, "host_local": True, "termination_attempted": True,
+                "terminated": True, "sigkill": False}
 
-    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", fake_terminate)
+    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", dead_terminate)
 
-    _reopen_parent_directly(conn, parent_id)
-    result = kb.invalidate_descendants_for_parent_reopen(
-        conn, parent_id, author="operator",
-    )
+    # Composed (caller-owned txn) so the drain is deferred to us, exactly as a terminal
+    # reopen composes it: nothing may be killed or released inside the invalidation write.
+    with kb.write_txn(conn):
+        result = kb.invalidate_descendants_for_parent_reopen(
+            conn, parent_id, author="operator",
+        )
 
-    assert kills and kills[0][0] == 424242
-    assert result["terminations"] == kills
+    # Held: the worker was NOT killed inside the invalidation write, and the ownership
+    # the row carried is reported verbatim so the finalize can CAS on it.
+    assert kills == []
+    assert result["held"] and result["held"][0]["id"] == child_id
+    held = result["held"][0]
+    assert held["claim_lock"] == lock and held["worker_pid"] == pid
+    assert held["worker_started_at"] == fp
+    child = kb.get_task(conn, child_id)
+    assert child is not None and child.status == "running"
+    assert child.claim_lock == lock and child.worker_pid == pid
+    assert kb.claim_task(conn, child_id, claimer="duplicate-probe") is None  # no duplicate
+
+    out = kb.finalize_descendant_invalidation(conn, parent_id, result)
+    assert kills and kills[0][0] == pid
+    assert [item["id"] for item in out["released"]] == [child_id]
+    assert out["deferred"] == []
     child = kb.get_task(conn, child_id)
     assert child is not None
     assert child.status == "todo"
     assert child.current_run_id is None
+    assert child.claim_lock is None and child.worker_pid is None
+    kinds = [e.kind for e in kb.list_events(conn, child_id)]
+    assert "descendant_reclaimed" in kinds
     run = kb.latest_run(conn, child_id)
     assert run is not None and run.outcome == "reclaimed"
+
+
+def test_surviving_descendant_worker_keeps_its_claim_and_no_duplicate(
+    conn, tmp_path, monkeypatch,
+):
+    """A descendant worker that survives termination keeps a HELD claim (no duplicate)."""
+    parent_id = kb.create_task(conn, title="ancestor", assignee="planner")
+    assert kb.complete_task(conn, parent_id, result="done")
+    child_id = kb.create_task(
+        conn, title="stubborn child", assignee="builder", parents=[parent_id],
+    )
+    claimed = kb.claim_task(conn, child_id)
+    assert claimed is not None
+    kbd._set_worker_pid(conn, child_id, 424242)
+    lock = claimed.claim_lock
+
+    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", lambda *a, **k: {
+        "prev_pid": 424242, "host_local": True, "termination_attempted": True,
+        "terminated": False, "sigkill": False})
+    monkeypatch.setattr(kb, "_worker_survived_termination", lambda t: True)
+
+    _reopen_parent_directly(conn, parent_id)
+    result = kb.invalidate_descendants_for_parent_reopen(conn, parent_id, author="operator")
+    out = kb.finalize_descendant_invalidation(conn, parent_id, result)
+
+    assert [item["id"] for item in out["deferred"]] == [child_id]
+    assert out["released"] == []
+    child = kb.get_task(conn, child_id)
+    assert child is not None and child.status == "running"
+    assert child.claim_lock == lock  # held, never cleared
+    assert kb.claim_task(conn, child_id, claimer="duplicate-probe") is None
+    deferred = [e for e in kb.list_events(conn, child_id) if e.kind == "reclaim_deferred"]
+    assert deferred and (deferred[-1].payload or {}).get("reason") == "ancestor_reopened_worker_alive"
+
+
+def test_finalize_refuses_to_clear_a_claim_that_changed_under_it(
+    conn, tmp_path, monkeypatch,
+):
+    """Snapshot CAS: a concurrent re-claim between hold and finalize is left untouched."""
+    parent_id = kb.create_task(conn, title="ancestor", assignee="planner")
+    assert kb.complete_task(conn, parent_id, result="done")
+    child_id = kb.create_task(
+        conn, title="running child", assignee="builder", parents=[parent_id],
+    )
+    claimed = kb.claim_task(conn, child_id)
+    assert claimed is not None
+    kbd._set_worker_pid(conn, child_id, 424242)
+
+    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", lambda *a, **k: {
+        "prev_pid": 424242, "host_local": True, "termination_attempted": True,
+        "terminated": True, "sigkill": False})
+
+    _reopen_parent_directly(conn, parent_id)
+    with kb.write_txn(conn):  # composed: the drain is ours to perform
+        result = kb.invalidate_descendants_for_parent_reopen(conn, parent_id, author="operator")
+
+    # A concurrent writer re-claims the card with a new owner before the finalize runs.
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET claim_lock = 'someone-else' WHERE id = ?", (child_id,))
+
+    out = kb.finalize_descendant_invalidation(conn, parent_id, result)
+
+    assert out["released"] == [] and out["deferred"] == []
+    child = kb.get_task(conn, child_id)
+    assert child is not None and child.status == "running"
+    assert child.claim_lock == "someone-else"  # a claim we did not hold is never cleared
+    assert kb.claim_task(conn, child_id, claimer="duplicate-probe") is None
 
 
 def test_counter_reset_on_invalidated_descendants(conn):
@@ -152,7 +250,7 @@ def test_counter_reset_on_invalidated_descendants(conn):
     assert child.consecutive_failures == 0
 
 
-def test_dashboard_and_db_paths_produce_identical_outcomes(tmp_path, monkeypatch):
+def test_dashboard_generic_status_cannot_reopen_accepted_parent(tmp_path, monkeypatch):
     fastapi = pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
     import importlib.util
@@ -188,45 +286,15 @@ def test_dashboard_and_db_paths_produce_identical_outcomes(tmp_path, monkeypatch
         return parent, child
 
     dash_parent, dash_child = build_graph("dash")
-    db_parent, db_child = build_graph("db")
 
-    # Surface 1: dashboard drag (done -> todo) via _set_status_direct.
+    # A dashboard status edit cannot revoke acceptance or invalidate children.
     r = client.patch(
         f"/api/plugins/kanban/tasks/{dash_parent}", json={"status": "todo"},
     )
-    assert r.status_code == 200, r.text
-
-    # Surface 2: DB function directly (the single domain implementation).
-    with kbc.connect() as c:
-        with kb.write_txn(c):
-            c.execute(
-                "UPDATE tasks SET status = 'todo', completed_at = NULL "
-                "WHERE id = ?",
-                (db_parent,),
-            )
-        kb.invalidate_descendants_for_parent_reopen(
-            c, db_parent, author="dashboard",
-        )
+    assert r.status_code == 409, r.text
 
     with kbc.connect() as c:
-        def snapshot(tid: str):
-            t = kb.get_task(c, tid)
-            assert t is not None
-            kinds = sorted(e.kind for e in kb.list_events(c, tid))
-            n_comments = len(kb.list_comments(c, tid))
-            return (
-                t.status,
-                t.completed_at,
-                t.current_run_id,
-                t.consecutive_failures,
-                kinds,
-                n_comments,
-            )
-
-        assert snapshot(dash_child) == snapshot(db_child)
-        status, completed_at, _run, failures, kinds, n_comments = snapshot(db_child)
-        assert status == "todo"
-        assert completed_at is None
-        assert failures == 0
-        assert "descendant_invalidated" in kinds
-        assert n_comments >= 1
+        assert kb.get_task(c, dash_parent).status == "done"
+        assert kb.get_task(c, dash_child).status == "done"
+        assert not any(e.kind == "descendant_invalidated"
+                       for e in kb.list_events(c, dash_child))

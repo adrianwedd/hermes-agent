@@ -76,6 +76,8 @@ def write_board_metadata(
     "" = clear (``project_id`` is not validated here)."""
     _kb._assert_not_delegated_child_mutation()
     slug = _kb._slug_or_default(board)
+    from hermes_cli.kanban_board_authorization import require_board_creation
+    require_board_creation(slug)
     meta = read_board_metadata(slug)
     # db_path is derived on every read; never persist it into board.json.
     meta.pop("db_path", None)

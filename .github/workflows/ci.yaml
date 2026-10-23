@@ -154,12 +154,9 @@ jobs:
       e2e_upgrade: ${{ needs.detect.outputs.e2e_upgrade == 'true' }}
       strict_acceptance: ${{ inputs.strict_acceptance || '' }}
 
-  # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
-  # the OS-marked tests it collects are skipped there by design (see the
-  # `_OS_MARKS` comment in tests/conftest.py) — this is where they run.
-  # Gated on `python` and on each lane it consumes: desktop_updater is set by
-  # TypeScript-only changes too (the Electron marker / result readers), and with
-  # `python` alone those never reached the Windows hand-off tests below.
+  # Windows-only lanes. The main `tests` lane above is Linux-only; macOS-marked
+  # tests run locally on Studio rather than on hosted CI runners.
+  # Same `python` lane gate: if no Python changed, Windows tests do not run.
   tests-os:
     name: OS-specific tests
     needs: detect

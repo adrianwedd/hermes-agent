@@ -167,7 +167,7 @@ _SPECS = [
         _arg("--assignee", help="Profile name to assign"),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
         _arg("--workspace",
-             help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "
+             help="scratch | worktree | worktree:<path> | dir:<path> (default: operator persistent folder when configured, otherwise scratch; "
                   "an explicit 'scratch' also opts out of a project-scoped board's project)"),
         _arg("--branch", help="Branch name for worktree tasks, e.g. wt/t6-wire"),
         _arg("--project",
@@ -246,6 +246,12 @@ _SPECS = [
         _arg("--step-key", dest="current_step_key", metavar="KEY",
              help="Restrict to tasks with this current_step_key"),
     ], aliases=["ls"], help="List tasks"),
+    _cmd("administrative-pending", [_TASK_ID,
+        _arg("--expect-status", required=True, choices=kb.VALID_STATUSES),
+        _arg("--expect-assignee"), _arg("--expect-contract-event", type=int),
+        _arg("--reason", required=True), _json_flag()],
+        help="Operator substantive-complete receipt hold; permanently suppress workers on this card"),
+    _cmd("completion-requirements", [_TASK_ID, _arg("--file", required=True), _arg("--expect-status", required=True, choices=kb.VALID_STATUSES), _arg("--expect-assignee"), _json_flag()], help="Operator declaration for inactive cards; preserves evidence gate"),
     _cmd("show", [_TASK_ID, _json_flag(), *_run_state_args("filter listed runs by task_runs column")],
          help="Show a task with comments + events"),
     _cmd("assign", [_TASK_ID, _arg("profile", help="Profile name (or 'none' to unassign)")],
@@ -323,7 +329,9 @@ _SPECS = [
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
     ], help="Mark one or more tasks blocked"),
+    _cmd("wait", [_arg("wait_operation", choices=("inspect", "declare", "satisfy", "invalidate", "supersede", "declare-output", "accept-output", "certify-output")), _arg("task_id"), _arg("document", nargs="?")], help="Native wait contracts and authorised certificates"),
     _cmd("schedule", [
+        _arg("--at", type=float, help="Finite Unix timestamp; reason-only waits are explicitly unsupported"),
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason/timing note (also appended as a comment)"),
         _bulk_ids("schedule"),
@@ -351,7 +359,13 @@ _SPECS = [
         _TASK_ID,
         _arg("reason", nargs="*", help="Audit-trail reason (recorded on the task_events row)"),
         _bulk_ids("promote"),
-        _arg("--dry-run", action="store_true", help="Validate the promotion without mutating state"),
+        _arg("--dry-run", action="store_true",
+             help="Validate the promotion without mutating state. NOT valid with "
+                  "--force: that compatibility route refuses a combined dry-run."),
+        _arg("--force", action="store_true",
+             help="Legacy Ready-override compatibility: reports an already-ready card but "
+                  "cannot revoke STOPs, waive prerequisites, qualify scope, reclaim workers "
+                  "or reopen review/completed work. Use the specific authorised transition."),
         _arg("--json", dest="json", action="store_true", help="Emit machine-readable JSON result"),
     ], help="Manually move one or more todo/blocked tasks to ready (recovery path)"),
     _cmd("archive", [
@@ -359,6 +373,13 @@ _SPECS = [
         _arg("--rm", dest="purge_ids", nargs="+",
              help="Permanently delete already-archived task ids from the board"),
     ], help="Archive one or more tasks"),
+    _cmd("close", [
+        _TASK_IDS,
+        _arg("--resolution",
+             help="Why the card is being closed. Stored as the card's result and the "
+                  "durable resolution event, standing in for the completion manifest a "
+                  "worker would have produced."),
+    ], help="Close one or more BLOCKED tasks as done (explicit operator resolution)"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [
         _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),

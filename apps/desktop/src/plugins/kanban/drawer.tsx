@@ -1,3 +1,6 @@
+import { observedRouteLabel } from './card-facts'
+import { cardIsTerminal, DispatchFacts } from './dispatch-facts'
+import { DeliveryDetails } from './delivery-receipt'
 /**
  * Task modal — the desktop port of the dashboard's task detail, Linear-style:
  * a centered two-column dialog (main: diagnostics, description, result,
@@ -41,6 +44,7 @@ import {
   $boardSlug,
   addComment,
   boardKeyPrefix,
+  closeTask,
   deleteTask,
   estimateTask,
   fetchLog,
@@ -57,11 +61,14 @@ import {
   useKanbanScope
 } from './api'
 import { ModelOverrideField, overridePatch } from './model-override'
+import { makePriorityWriter, PriorityEditor } from './priority-editor'
+import { notifyReadyRelease, releaseOutcome } from './ready-release'
 import {
   type Diagnostic,
   type DiagnosticAction,
   type KanbanAttachment,
   type KanbanEvent,
+  type KanbanTask,
   type KanbanTaskDetail,
   SEVERITY_TONE,
   type TaskEstimate,
@@ -77,7 +84,6 @@ import {
   isLockedTarget,
   type KanbanText,
   lockedReason,
-  PriorityGlyph,
   ScrollFade,
   Section,
   shortId,
@@ -228,6 +234,9 @@ function WorkspaceValue({ kind, path }: { kind: null | string | undefined; path:
     </div>
   )
 }
+
+// A plain Move-to-Ready is not an operator release. A held card receives a
+// refusal from the backend; a distinct reason-bearing release is required.
 
 /** The dashboard's diagnostics panel: severity-toned, plain-English, with the
  *  backend's structured recovery actions as buttons. `reassign` is skipped —
@@ -577,14 +586,63 @@ function AttachmentsSection({
   )
 }
 
+function RunRoutesSection({ task }: { task: KanbanTask }) {
+  const routes = task.card_facts?.run_routes
+  return <Section label="Agent and recorded model routes">
+    {!routes ? <p className="text-xs text-(--ui-text-tertiary)">Awaiting backend update; run route receipts unavailable.</p> : routes.history.length === 0 ? <p className="text-xs">Planned agent: {routes.planned_agent} · no run yet</p> : routes.history.map(run => <div className="mb-3 min-w-0 text-xs [overflow-wrap:anywhere]" key={run.run_id}>
+      <p>Run {run.run_id} · agent {run.agent}</p>
+      <p>Last observed: {observedRouteLabel(run.last_observed)}{run.last_observed?.observed_at ? ` · ${new Date(run.last_observed.observed_at * 1000).toLocaleString()}` : ''}</p>
+      <p>Launch: {observedRouteLabel(run.launch)}</p>
+      <p className="text-(--ui-text-tertiary)">{run.basis}</p>
+    </div>)}
+  </Section>
+}
+
+function RecordedTokensSection({ task }: { task: KanbanTask }) {
+  const tokens = task.card_facts?.tokens
+  const usage = task.status === 'running' ? tokens?.current : tokens?.cumulative
+  const value = (n: number | null | undefined) => n == null ? 'not reported' : n.toLocaleString()
+  return <Section label="Recorded token usage">
+    <div className="flex min-w-0 flex-col gap-1 text-[0.6875rem] leading-relaxed text-(--ui-text-tertiary)">
+      <p>{task.status === 'running' ? 'Current run' : 'Card cumulative recorded runs'} · partial coverage</p>
+      <p>Total: {value(usage?.total)} · input including cache: {value(usage?.input)} · output: {value(usage?.output)}</p>
+      <p>Uncached input: {value(usage?.uncached_input)} · cached read: {value(usage?.cache_read)} · cache write: {value(usage?.cache_write)}</p>
+      <p>Cache hits: not reported · cache misses: not reported</p>
+      {task.status === 'running' && <p>Card cumulative recorded runs: {value(tokens?.cumulative?.total)}</p>}
+      <p>{tokens?.coverage || 'No linked usage record available. Auxiliary and unreported calls are not guaranteed.'}</p>
+    </div>
+  </Section>
+}
+
+function makeDrawerPriorityWriter(id: string, invalidate: () => void) {
+  const persist = makePriorityWriter({
+    fetch: () => fetchTask(id),
+    invalidate,
+    patch: body => patchTask(id, body)
+  })
+  return async (taskId: string, priority: number) => {
+    try {
+      return await persist(taskId, priority)
+    } catch (error) {
+      host.notify({ kind: 'error', message: errText(error) })
+      throw error
+    }
+  }
+}
+
+function unresolvedParentIds(detail: KanbanTaskDetail | undefined) {
+  const statuses = new Map((detail?.link_tasks ?? []).map(linked => [linked.id, linked.status]))
+  return (detail?.links.parents ?? []).filter(id => !['done', 'archived'].includes(statuses.get(id) ?? ''))
+}
+
 // Rough effort estimate via the auxiliary (auto-routed) model. Tokens +
 // complexity, never dollars — providers don't report cost reliably. Gated
 // behind an explicit click + disclaimer since it makes a model call. The
 // control keeps a stable footprint (spinner swaps in place) so there's no
 // layout jump when it runs.
-function EstimateSection({ id }: { id: string }) {
+function EstimateSection({ id, saved, backendReady }: { id: string; saved?: null | TaskEstimate; backendReady: boolean }) {
   const k = useKanban()
-  const [result, setResult] = useState<null | TaskEstimate>(null)
+  const [result, setResult] = useState<null | TaskEstimate>(saved ?? null)
 
   const est = useMutation({
     mutationFn: () => estimateTask(id),
@@ -599,10 +657,11 @@ function EstimateSection({ id }: { id: string }) {
   })
 
   // A new task resets the cached estimate (the drawer reuses one instance).
-  useEffect(() => setResult(null), [id])
+  useEffect(() => setResult(saved ?? null), [id, saved])
 
   return (
     <Section label={k.estimate}>
+      {!backendReady && <p className="text-[0.6875rem] text-(--ui-text-tertiary)">Durable estimates await the backend update.</p>}
       {result?.ok ? (
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2 text-[0.8125rem]">
@@ -618,7 +677,7 @@ function EstimateSection({ id }: { id: string }) {
               <Button
                 aria-label={k.reEstimate}
                 className="ml-auto"
-                disabled={est.isPending}
+                disabled={est.isPending || !backendReady}
                 onClick={() => est.mutate()}
                 size="icon-xs"
                 variant="ghost"
@@ -627,13 +686,15 @@ function EstimateSection({ id }: { id: string }) {
               </Button>
             </Tip>
           </div>
+          {result.stale_scope && <p className="text-[0.6875rem] text-amber-500">Task scope changed since this estimate.</p>}
+          {result.created_at && <p className="text-[0.625rem] text-(--ui-text-quaternary)">Saved {new Date(result.created_at * 1000).toLocaleString()} · native estimate</p>}
           {result.rationale && (
             <p className="text-[0.6875rem] leading-relaxed text-(--ui-text-quaternary)">{result.rationale}</p>
           )}
         </div>
       ) : (
         <div className="flex items-center gap-2">
-          <Button disabled={est.isPending} onClick={() => est.mutate()} size="xs" variant="outline">
+          <Button disabled={est.isPending || !backendReady} onClick={() => est.mutate()} size="xs" variant="outline">
             <Codicon name={est.isPending ? 'loading' : 'dashboard'} size="0.75rem" spinning={est.isPending} />
             {est.isPending ? k.estimating : k.estimateEffort}
           </Button>
@@ -856,6 +917,10 @@ export function TaskDrawer({
 
   const task = detail?.task
   const running = task?.status === 'running'
+  // A completed card has a resolution, not an active diagnostic. The backend withholds the
+  // rollup for terminal statuses; gating the section here too means a cached payload cannot
+  // resurrect a stale fault report in the drawer.
+  const terminal = task ? cardIsTerminal(task) : false
   const defaultAssignee = useDefaultAssignee()
 
   const { data: log } = useQuery({
@@ -884,6 +949,15 @@ export function TaskDrawer({
 
       return { previous }
     },
+    onSuccess: (response, status) => {
+      // A held card is refused by the backend; only a separate explicit release
+      // may return a release outcome. Report an outcome only when one exists.
+      notifyReadyRelease(id!, response, k)
+
+      if (status === 'ready' && !releaseOutcome(response)) {
+        host.notify({ kind: 'success', message: k.unblockedMessage(shortId(id!)) })
+      }
+    },
     onError: (err, _status, context) => {
       if (context?.previous) {
         qc.setQueryData(taskKey(scope, slug, id!), context.previous)
@@ -894,14 +968,22 @@ export function TaskDrawer({
     onSettled: invalidate
   })
 
-  const mutate = (fn: () => Promise<unknown>, onDone?: () => void) => () =>
+  const onReadyGesture = (_taskId?: string) => {
+    // The status menu and diagnostic "Unblock" send an ordinary status patch.
+    // The backend refuses it if the card needs a distinct operator release.
+    moveMut.mutate('ready')
+  }
+
+  const mutate = (fn: () => Promise<unknown>, onDone?: (value: unknown) => void) => () =>
     fn().then(
-      () => {
+      value => {
         invalidate()
-        onDone?.()
+        onDone?.(value)
       },
       (err: unknown) => host.notify({ kind: 'error', message: errText(err) })
     )
+
+  const priorityWriter = makeDrawerPriorityWriter(id!, invalidate)
 
   const commentMut = useMutation({
     mutationFn: (body: string) => addComment(id!, body),
@@ -944,6 +1026,9 @@ export function TaskDrawer({
   // Linked tasks resolved to titles by the backend (`link_tasks`); absent on
   // older backends, where the chips fall back to short ids.
   const linkTitles = new Map((detail?.link_tasks ?? []).map(linked => [linked.id, linked.title]))
+  // A completed prerequisite is provenance, not a current blocker.  Keep the
+  // persisted link in the graph, but never present it under "Blocked by".
+  const activeParentIds = unresolvedParentIds(detail)
 
   const move = (status: string) => {
     if (!task || status === task.status) {
@@ -1013,6 +1098,20 @@ export function TaskDrawer({
                       {k.copyTitle}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
+                    {task.status === 'blocked' && (
+                      <DropdownMenuItem
+                        onSelect={mutate(
+                          () => closeTask(task.id),
+                          () => {
+                            invalidate()
+                            host.notify({ kind: 'success', message: k.closedMessage(shortId(task.id)) })
+                          }
+                        )}
+                      >
+                        <Codicon name="check" size="0.85rem" />
+                        {k.closeBlocked}
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuItem onSelect={mutate(() => patchTask(task.id, { status: 'archived' }), onClose)}>
                       <Codicon name="archive" size="0.85rem" />
                       {k.archive}
@@ -1056,17 +1155,12 @@ export function TaskDrawer({
                     </Callout>
                   )}
 
-                  {task.diagnostics && task.diagnostics.length > 0 && (
+                  {task.diagnostics && task.diagnostics.length > 0 && !terminal && (
                     <Section label={k.diagnosticsN(task.diagnostics.length)}>
                       <Diagnostics
                         items={task.diagnostics}
                         onReclaim={() => void mutate(() => reclaimTask(task.id))()}
-                        onUnblock={() =>
-                          void mutate(
-                            () => patchTask(task.id, { status: 'ready' }),
-                            () => host.notify({ kind: 'success', message: k.unblockedMessage(shortId(task.id)) })
-                          )()
-                        }
+                        onUnblock={() => onReadyGesture(task.id)}
                       />
                     </Section>
                   )}
@@ -1107,7 +1201,15 @@ export function TaskDrawer({
                 </MetaRow>
                 {typeof task.priority === 'number' && (
                   <MetaRow label={k.metaPriority}>
-                    <PriorityGlyph priority={task.priority} />
+                    {/* After-creation priority is native scheduling input, so
+                        the write goes through PATCH + a server readback rather
+                        than an optimistic local edit (see priority-editor.tsx
+                        for why the generic `mutate()` helper is not reused). */}
+                    <PriorityEditor
+                      onSave={priorityWriter}
+                      priority={task.priority}
+                      taskId={task.id}
+                    />
                   </MetaRow>
                 )}
                 {task.tenant && <MetaRow label={k.metaTenant}>{task.tenant}</MetaRow>}
@@ -1153,18 +1255,22 @@ export function TaskDrawer({
                     }}
                   />
                 </MetaRow>
-                {(detail.links.parents.length > 0 || detail.links.children.length > 0) &&
+                {(activeParentIds.length > 0 || detail.links.children.length > 0) &&
                   (['parents', 'children'] as const).map(side =>
-                    detail.links[side].length > 0 ? (
+                    (side === 'parents' ? activeParentIds : detail.links.children).length > 0 ? (
                       <MetaRow key={side} label={side === 'parents' ? k.blockedBy : k.blocks}>
-                        <LinkChips ids={detail.links[side]} linkTitles={linkTitles} onOpen={onOpen} />
+                        <LinkChips ids={side === 'parents' ? activeParentIds : detail.links.children} linkTitles={linkTitles} onOpen={onOpen} />
                       </MetaRow>
                     ) : null
                   )}
                 {task.created_by && <MetaRow label={k.metaCreatedBy}>{task.created_by}</MetaRow>}
                 {ago(task.created_at) && <MetaRow label={k.metaCreated}>{ago(task.created_at)}</MetaRow>}
                 {running && task.worker_pid ? <MetaRow label={k.metaWorkerPid}>{task.worker_pid}</MetaRow> : null}
-                <EstimateSection id={task.id} />
+                <Section label={k.dispatch.heading}><DispatchFacts task={task} /></Section>
+                <Section label="Delivery receipt"><DeliveryDetails receipt={task.card_facts?.delivery} /></Section>
+                <RunRoutesSection task={task} />
+                <RecordedTokensSection task={task} />
+                <EstimateSection backendReady={Object.prototype.hasOwnProperty.call(task, 'task_estimate')} id={task.id} saved={task.task_estimate} />
 
                 {Array.isArray(detail.attachments) && (
                   <AttachmentsSection

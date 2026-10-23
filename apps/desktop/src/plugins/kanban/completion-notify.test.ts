@@ -399,31 +399,25 @@ describe('notification failure isolation', () => {
 })
 
 describe('terminal kinds beyond completed', () => {
-  it('blocked notifies with the payload reason and a warning toast', async () => {
+  it('notifies once for new blocker and block-loop events', async () => {
     const m = await loadModule()
     m.bindCompletionNotify(makeRest(() => 100) as never)
 
-    const fired = await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'needs API key' })])
+    const fired = await m.onKanbanEventsFrame('smoke', [
+      ev(101, 'blocked', { reason: 'needs API key' }),
+      ev(102, 'block_loop_detected', { reason: 'same cause 3x' })
+    ])
 
     expect(fired).toBe(true)
-    expect(lastNotify()).toMatchObject({
-      kind: 'warning',
-      message: 'needs API key',
-      detail: 't101'
+    expect(hostMock.notify).toHaveBeenCalledTimes(2)
+    expect(hostMock.notify.mock.calls[0][0]).toMatchObject({
+      kind: 'warning', message: 'needs API key'
     })
-  })
-
-  it('block_loop_detected notifies that a decision is needed', async () => {
-    const m = await loadModule()
-    m.bindCompletionNotify(makeRest(() => 100) as never)
-
-    const fired = await m.onKanbanEventsFrame('smoke', [ev(101, 'block_loop_detected', { reason: 'same cause 3x' })])
-
-    expect(fired).toBe(true)
-    expect(lastNotify()).toMatchObject({
-      kind: 'warning',
-      message: 'same cause 3x'
+    expect(hostMock.notify.mock.calls[1][0]).toMatchObject({
+      kind: 'warning', message: 'same cause 3x'
     })
+    await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked'), ev(102, 'block_loop_detected')])
+    expect(hostMock.notify).toHaveBeenCalledTimes(2)
   })
 
   it('gave_up: plain-words body, raw payload error only in detail; crashed and timed_out fall back to the task id', async () => {

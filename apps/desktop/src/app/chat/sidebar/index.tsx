@@ -1961,7 +1961,7 @@ export function ChatSidebar({
                 onReorderProjects={showAllProfiles ? undefined : reorderProjects}
                 onReorderSessions={showAllProfiles ? undefined : reorderSessions}
                 onResumeSession={onResumeSession}
-                onToggle={() => setSidebarRecentsOpen(!agentsOpen)}
+                onToggle={() => setSidebarRecentsOpen(!$sidebarRecentsOpen.get())}
                 onTogglePin={pinSession}
                 onToggleUnread={toggleUnread}
                 open={agentsOpen}

@@ -10,6 +10,38 @@ description: "Durable SQLite-backed task board for coordinating multiple Hermes 
 
 Hermes Kanban is a durable task board, shared across all your Hermes profiles, that lets multiple named agents collaborate on work without fragile in-process subagent swarms. Every task is a row in `~/.hermes/kanban.db`; every handoff is a row anyone can read and write; every worker is a full OS process with its own identity.
 
+### Authorizing new boards and isolating tests
+
+Set `kanban.board_creation_allowlist: []` in the shared Kanban home's configuration
+to prevent new boards. Existing boards remain available. An operator can authorize
+one exact new slug by adding it to that list; there is no wildcard or CLI bypass.
+The policy applies to dashboard/CLI creation, metadata creation, import (including
+automatically suffixed names), and implicit database creation. An omitted or null
+setting retains legacy provisioning behavior.
+
+Use `python scripts/run_kanban_probe.py -- <command> ...` for ad hoc acceptance
+checks. It uses a fresh temporary home, pins all Kanban paths to it, removes worker
+identity and production environment pins, and cleans up after the command exits.
+The probe uses the isolated Default board; new named boards are locked. Keep probe
+processes attached and finish all children before returning. Do not copy production
+configuration or use double-fork helpers to bypass worker authority checks.
+The regular Python suite continues to use `scripts/run_tests.sh` and its hermetic fixtures.
+
+### Persistent local task folder
+
+For local tasks without a repository, set `kanban.persistent_workdir` to an
+absolute operator-owned folder in the shared Kanban home's `config.yaml`.
+Omitted workspaces then resolve to `dir` in that folder across CLI, dashboard,
+agent creation, decomposition and dispatch. Explicit task subdirectories must
+remain under it. New tasks cannot select scratch, worktree, project or branch
+settings, and do not inherit board or creator projects. The dashboard displays
+the effective folder even when older board metadata still names a repository.
+
+Existing tasks retain their recorded paths and files. Missing legacy workspaces
+are not silently recreated; unresolved tasks use the persistent folder. Completion,
+parent cleanup and workspace garbage collection retain task files under this policy.
+No existing board or task data is migrated or deleted. Provider routing is independent.
+
 ### Completion checkpoints before the iteration cap
 
 Dispatcher-owned workers get one checkpoint notice near 90% of their finite iteration
@@ -30,7 +62,7 @@ checkpoint; their iteration warning remains opt-in.
 
 The board has two front doors, both backed by the same `~/.hermes/kanban.db`:
 
-- **Agents drive the board through a dedicated `kanban_*` toolset** — `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_request_review`, `kanban_request_changes`, `kanban_block`, `kanban_heartbeat`, `kanban_comment`, `kanban_attach`, `kanban_attach_url`, `kanban_attachments`, `kanban_create`, `kanban_link`, `kanban_unblock`. The dispatcher spawns each worker with these tools already in its schema; orchestrator profiles can also enable the `kanban` toolset explicitly. The model reads and routes tasks by calling tools directly, *not* by shelling out to `hermes kanban`. See [How workers interact with the board](#how-workers-interact-with-the-board) below.
+- **Agents report work through a dedicated `kanban_*` toolset** — `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_request_review`, `kanban_request_changes`, `kanban_block`, `kanban_heartbeat`, `kanban_comment`, `kanban_attach`, `kanban_attach_url`, `kanban_attachments`, `kanban_create`, `kanban_link`. The dispatcher spawns each worker with the task-scoped tools already in its schema; orchestrator profiles can also enable the toolset explicitly. Releasing a blocked task into the dispatch path is deliberately absent: that remains a human/control-plane operation. See [How workers interact with the board](#how-workers-interact-with-the-board) below.
 - **You (and scripts, and cron) drive the board through `hermes kanban …`** on the CLI, `/kanban …` as a slash command, or the dashboard. These are for humans and automation — the places without a tool-calling model behind them.
 
 Both surfaces route through the same `kanban_db` layer, so reads see a consistent view and writes can't drift. The rest of this page shows CLI examples because they're easy to copy-paste, but every CLI verb has a tool-call equivalent the model uses.
@@ -473,7 +505,6 @@ Dispatcher-owned workers receive their task lifecycle tools automatically.
 | `kanban_attachments` | List a task's attachments. | — |
 | `kanban_create` | (Orchestrators) fan out into child tasks with an `assignee`, optional `parents`, `skills`, etc. Returns `gated: true` + `gated_by` when an open parent parked the new card in `todo`. | `title`, `assignee` |
 | `kanban_link` | (Orchestrators) add a `parent_id → child_id` dependency edge after the fact. Returns `gated: true` when the child was `ready` and got demoted back to `todo` because the parent is not done — the child will only run after the parent completes. Refused with `child is already running` when the child is already claimed — an edge added after the claim cannot serialise the run (a worker may still link its *own* running card ahead of a `kind=dependency` block). | `parent_id`, `child_id` |
-| `kanban_unblock` | (Orchestrators) restore a blocked task to its source phase (`review` or `ready`), or `todo` while a parent remains open. | `task_id` |
 
 A typical worker turn looks like:
 
@@ -510,7 +541,7 @@ kanban_create(
 kanban_complete(summary="decomposed into 2 research tasks + 1 writer; linked dependencies")
 ```
 
-The "(Orchestrators)" tools — `kanban_list`, `kanban_create`, `kanban_link`, `kanban_unblock`, and `kanban_comment` on foreign tasks — are available through the same toolset; the convention (encoded in the auto-injected kanban guidance) is that worker profiles don't fan out or route unrelated work, and orchestrator profiles don't execute implementation work. Dispatcher-spawned workers are still task-scoped for destructive lifecycle operations and cannot mutate unrelated tasks.
+The "(Orchestrators)" tools — `kanban_list`, `kanban_create`, `kanban_link`, and `kanban_comment` on foreign tasks — are available through the same toolset; the convention (encoded in the auto-injected kanban guidance) is that worker profiles don't fan out or route unrelated work, and orchestrator profiles don't execute implementation work. Unblock is deliberately excluded from every model-visible toolset. Dispatcher-spawned workers are still task-scoped for destructive lifecycle operations and cannot mutate unrelated tasks.
 
 ### Why tools instead of shelling to `hermes kanban`
 

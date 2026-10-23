@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "kind": "audit",
+  "local_only": true,
+  "require_review": false,
+  "require_commands": false,
+  "criteria": [
+    "explicit_completion_result_recorded"
+  ],
+  "scope": "Yeah. I think the experiment is telling you something fairly clear:  **MoA is not fixing the kind of failure Hermes actually has.**  The failures we\u2019ve been watching are mostly not:  > \u201cDeepSeek couldn\u2019t reason through this technical problem.\u201d  They\u2019re:  > \u201cthe system gave a model stale/contradictory state, asked the wrong question, allowed the wrong transition, then treated another model\u2019s opinion as progress.\u201d  Adding 6.1 Sol plus an Ollama Cloud adviser on top of that can just produce **more sophisticated agreement about the wrong abstraction**.  A babysitter only helps if it has something meaningfully different to do. If both models receive a 500-line polluted card history and are effectively asked \u201cwhat next?\u201d, you get:  ```text worker:   concludes X  adviser:   reviews X in same broken frame   suggests caveats / extra validation  aggregator:   turns caveats into more work ```  Which is basically what Hermes has been doing already.  The useful form of MoA would be much narrower:  ```text DeepSeek / Codex:     perform bounded technical work  6.1 Sol:     propose result / next state  adviser:     ONLY try to falsify:       - is this work already done?       - is there actually a worker-executable action?       - is this authority missing?       - does this create duplicate work?       - does this violate a lifecycle invariant?  deterministic controller:     apply hard rules     decide transition ```  The adviser should not be \u201canother smart agent with opinions\u201d. It should be a **hostile state-transition auditor**.  And critically, it should receive a compact canonical object, not the whole archaeological dig:  ```yaml accepted_evidence:   - ... completed_actions:   - ... remaining_actions:   - ... operator_authority:   live_test: false worker_executable_actions: [] current_dependencies:   - ... proposed_transition: WAITING ```  Then ask exactly:  > \u201cCan you identify any evidence that this transition is invalid? Do not propose new work unless an accepted requirement is demonstrably unsatisfied.\u201d  That might actually help.  But I would **not** use MoA to compensate for DeepSeek being the executive controller. The pruning fiasco shows why: once the harness thinks \u201cnonterminal = needs reasoning\u201d, three smart models can spend half a million tokens rediscovering that nothing should happen.  Given what you\u2019ve seen today, my current hierarchy would be:  ```text 5.6 Sol   executive / board grooming / lifecycle judgement  DeepSeek / Codex   implementation, forensics, bounded technical tasks  6.1 Sol   hostile review, bug finding, regression design  Ollama-cloud adviser   optional falsifier at high-value decision boundaries only ```  Rather than:  ```text DeepSeek   does work  6.1 Sol + cloud adviser   babysit it continuously ```  Because continuous supervision is expensive and seems to encourage **epistemic bureaucracy** rather than better decisions.  The experiment I\u2019d run now is very small: take 10 of the horrible real cards we\u2019ve already debugged and compare:  1. 5.6 Sol alone on a canonical state summary. 2. 6.1 Sol alone. 3. 6.1 Sol + one adviser. 4. DeepSeek + one adviser.  Score only:  ```text correct state correct next action unnecessary worker launched? missed executable work? invented dependency? operator gate respected? tokens used ```  Not prose quality. Not \u201cinteresting insights\u201d.  My suspicion is that **the adviser adds much less than simply having the right executive model plus hard invariants**.  And if that\u2019s true, MoA is probably best reserved for genuinely contested technical judgements, not routine Kanban control.",
+  "scope_sha256": "7bc90390af402f1367bdd53eed7d07d7afa2677f0bf67895ef7e221a9d991a74",
+  "scope_source": "task_title_body_at_pre_dispatch_boundary",
+  "task_created_at": 1791289559,
+  "materialized_by": "control_plane_pre_promotion",
+  "qualified_for_dispatch": true,
+  "legacy_completion_repair": true,
+  "remaining_required_actions": [
+    "Yeah. I think the experiment is telling you something fairly clear:  **MoA is not fixing the kind of failure Hermes actually has.**  The failures we\u2019ve been watching are mostly not:  > \u201cDeepSeek couldn\u2019t reason through this technical problem.\u201d  They\u2019re:  > \u201cthe system gave a model stale/contradictory state, asked the wrong question, allowed the wrong transition, then treated another model\u2019s opinion as progress.\u201d  Adding 6.1 Sol plus an Ollama Cloud adviser on top of that can just produce **more sophisticated agreement about the wrong abstraction**.  A babysitter only helps if it has something meaningfully different to do. If both models receive a 500-line polluted card history and are effectively asked \u201cwhat next?\u201d, you get:  ```text worker:   concludes X  adviser:   reviews X in same broken frame   suggests caveats / extra validation  aggregator:   turns caveats into more work ```  Which is basically what Hermes has been doing already.  The useful form of MoA would be much narrower:  ```text DeepSeek / Codex:     perform bounded technical work  6.1 Sol:     propose result / next state  adviser:     ONLY try to falsify:       - is this work already done?       - is there actually a worker-executable action?       - is this authority missing?       - does this create duplicate work?       - does this violate a lifecycle invariant?  deterministic controller:     apply hard rules     decide transition ```  The adviser should not be \u201canother smart agent with opinions\u201d. It should be a **hostile state-transition auditor**.  And critically, it should receive a compact canonical object, not the whole archaeological dig:  ```yaml accepted_evidence:   - ... completed_actions:   - ... remaining_actions:   - ... operator_authority:   live_test: false worker_executable_actions: [] current_dependencies:   - ... proposed_transition: WAITING ```  Then ask exactly:  > \u201cCan you identify any evidence that this transition is invalid? Do not propose new work unless an accepted requirement is demonstrably unsatisfied.\u201d  That might actually help.  But I would **not** use MoA to compensate for DeepSeek being the executive controller. The pruning fiasco shows why: once the harness thinks \u201cnonterminal = needs reasoning\u201d, three smart models can spend half a million tokens rediscovering that nothing should happen.  Given what you\u2019ve seen today, my current hierarchy would be:  ```text 5.6 Sol   executive / board grooming / lifecycle judgement  DeepSeek / Codex   implementation, forensics, bounded technical tasks  6.1 Sol   hostile review, bug finding, regression design  Ollama-cloud adviser   optional falsifier at high-value decision boundaries only ```  Rather than:  ```text DeepSeek   does work  6.1 Sol + cloud adviser   babysit it continuously ```  Because continuous supervision is expensive and seems to encourage **epistemic bureaucracy** rather than better decisions.  The experiment I\u2019d run now is very small: take 10 of the horrible real cards we\u2019ve already debugged and compare:  1. 5.6 Sol alone on a canonical state summary. 2. 6.1 Sol alone. 3. 6.1 Sol + one adviser. 4. DeepSeek + one adviser.  Score only:  ```text correct state correct next action unnecessary worker launched? missed executable work? invented dependency? operator gate respected? tokens used ```  Not prose quality. Not \u201cinteresting insights\u201d.  My suspicion is that **the adviser adds much less than simply having the right executive model plus hard invariants**.  And if that\u2019s true, MoA is probably best reserved for genuinely contested technical judgements, not routine Kanban control.",
+    "Prepare only an offline comparison protocol for the explicitly described ten-card state-transition experiment: use existing audited Kanban cards and compact canonical evidence, freeze independently derived ground truth and score correct state/next action, unnecessary launches, missed executable work, invented dependencies, gate compliance and tokens. No model call, adviser launch, actual comparative experiment, paid API, executive-model change or production control-plane modification. Hand off protocol for review; original proposed comparison remains unexecuted.",
+    "Exact comparison routes and allowed inference source/budget are explicitly qualified before any model/adviser execution; no unapproved paid inference or local residency",
+    "The original described comparison is actually run under its accepted protocol and produces verifier-backed scoring, without changing production routing",
+    "Apply only the reviewer-requested correction: Offline-phase review: file SHA256 values match bundle-hashes.json and ZIP CRC integrity passes; four arms, seven metrics and authority boundaries are specified. However protocol lines 13\u201314/76 and source-manifest explicitly defer the required independent historical ground-truth freeze. Produce ten qualified historical-boundary canonical packets and independently adjudicated, cited, hash-bound private labels with dated sign-off; update the bundle and resubmit. If independent adjudication/access cannot be obtained, identify the exact external prerequisite rather than claim a freeze. No inference, adviser launch, comparative experiment, production change or whole-goal Done is authorised or requested; future acceptance conditions remain outstanding.",
+    "Apply only the reviewer-requested correction: Complete the independently requested offline correction from review754: reconstruct ten cited historical-boundary canonical packets, verified then-available source/artifact provenance, and explicitly PROVISIONAL proposed state/action/gate labels with hashes. The protocol two-human-adjudicator restriction was introduced by the implementer, not original operator authority; update that procedure to native independent reviewer adjudication. Hand the evidence and provisional labels to the separate reviewer, who must independently decide, cite, resolve disagreement and freeze/sign labels; implementation must not certify its own independence. If actual source bytes/access are unavailable, identify that precise evidence gap. No actual comparison, inference, adviser launch, production change or future grant.",
+    "Apply only the reviewer-requested correction: Offline correction only: case03 omits decisive operator comment1114 from cited provenance/authority and fails to preserve its explicit no-dispatch/no-reviewer gate; retain exact cited bytes and gate. Case10 marks review-bearing r1 completed although event5224 only requests review and independent_review remains outstanding; split delivered implementation from unaccepted review and audit this consistency across packets. Regenerate hashes/bundle and resubmit provisional proposals for separate reviewer all-ten adjudication/sign-off. ZIP CRC and ten packet SHA256 checks pass, but no cohort freeze is accepted. No inference, comparative execution, new authority, production action or whole-goal completion requested.",
+    "Apply only the reviewer-requested correction: Review772: prior case03/case10 corrections and all bundle SHA256/ZIP checks pass. Canonical inputs still omit substantive decision contracts (case01 replaces event11035 scope with original_scope_complete; case04 omits comment344's ten conditions) despite tools-disabled packet-only evaluation and no-truncation requirement. Supply bounded cited substantive scope/acceptance mappings and audit all ten. Resolve protocol gate_ids/rule_id namespace mismatch: private gates are absent from public packet entries while unsupported IDs must be rejected; define stable public gate/controller IDs and aligned labels/validation, with offline valid/invalid examples. Preserve historical authority; regenerate bundle/proposals and resubmit for separate all-ten adjudication and dated freeze. No inference, adviser, comparison, production action or whole-goal completion is authorised/requested."
+  ],
+  "selected_next_action": {
+    "phase": "READY",
+    "type": "review_correction",
+    "action": "Apply only the reviewer-requested correction: Review772: prior case03/case10 corrections and all bundle SHA256/ZIP checks pass. Canonical inputs still omit substantive decision contracts (case01 replaces event11035 scope with original_scope_complete; case04 omits comment344's ten conditions) despite tools-disabled packet-only evaluation and no-truncation requirement. Supply bounded cited substantive scope/acceptance mappings and audit all ten. Resolve protocol gate_ids/rule_id namespace mismatch: private gates are absent from public packet entries while unsupported IDs must be rejected; define stable public gate/controller IDs and aligned labels/validation, with offline valid/invalid examples. Preserve historical authority; regenerate bundle/proposals and resubmit for separate all-ten adjudication and dated freeze. No inference, adviser, comparison, production action or whole-goal completion is authorised/requested.",
+    "review_run_id": 772,
+    "required_authority": null
+  },
+  "completion_conditions": [
+    {
+      "id": "comparison-inference-authority",
+      "requirement": "Exact comparison routes and allowed inference source/budget are explicitly qualified before any model/adviser execution; no unapproved paid inference or local residency",
+      "resolver": "runtime controller and Adrian for new billing/authority",
+      "satisfied": false
+    },
+    {
+      "id": "comparison-evidence",
+      "requirement": "The original described comparison is actually run under its accepted protocol and produces verifier-backed scoring, without changing production routing",
+      "resolver": "authorised comparison worker after explicit qualification",
+      "satisfied": false
+    }
+  ],
+  "wait_contract": {
+    "owned_block_event": 18424,
+    "version": 1,
+    "gates": [
+      {
+        "id": "blocked:17321",
+        "revision": 1,
+        "declaration": "3d3e2027f3534f81781756b09ef9282292415142ddc4f5fc4648b0f7925dd899",
+        "evaluator": "attestation",
+        "parameters": {
+          "source_event_id": 17321,
+          "native_condition": {
+            "reason": "Review772 corrections and regenerated ten-packet/provisional-label bundle pass offline verification, but native review handoff twice rejects routing until the separate reviewer's all-ten adjudication/dated freeze is already complete. Operator/controller must permit routing to existing reviewer for that required adjudication; implementation cannot self-certify independence, and no inference/experiment is authorised.",
+            "kind": "needs_input",
+            "recurrences": 1,
+            "source_status": "ready",
+            "native_block_kind": "needs_input",
+            "last_failure_error": null,
+            "consecutive_failures": 0
+          },
+          "native_condition_sha256": "462bccaacf234e9380e7ceb960ba3fcd8cd6e0617cc91a121c06e15aea2b7fd2",
+          "condition_id": null,
+          "required_assertions": [
+            "all_original_constraints_verified",
+            "authority_verified",
+            "evidence_applicability_verified"
+          ]
+        },
+        "resolver": "operator",
+        "stage": "BLOCKED",
+        "reason": "Native external restriction requires explicit qualified attestation",
+        "current_unblock_action": "Record authorised evidence satisfying every clause of native condition blocked:17321",
+        "wake_trigger": [
+          "dispatcher_tick",
+          "restart_reconciliation",
+          "wait_gate_satisfied",
+          "wait_gate_invalidated"
+        ]
+      },
+      {
+        "id": "blocked:18424",
+        "revision": 1,
+        "declaration": "3ce29ec3114515d970c851d878ebb0db030a242423cf1d45aad04702671b0f5c",
+        "evaluator": "attestation",
+        "parameters": {
+          "source_event_id": 18424,
+          "native_condition": {
+            "reason": "Fresh control-plane reproduction: operator-authorised routing prerequisite was satisfied with attachment 1180, but native request-review still rejects because independent adjudication/freeze is not complete before reviewer routing. This is a review-transition defect, not missing user permission or a request to repeat implementation. Preserve corrected packets and provisional labels; no comparison inference or whole-goal completion. Hold automatic redispatch until the existing lifecycle owner fixes or provides a supported bounded review transition.",
+            "kind": "capability",
+            "recurrences": 1,
+            "source_status": "ready"
+          },
+          "native_condition_sha256": "a42b8a167105493e047e8a8bd602fd8756f9ccbfd2af0de3b69a3efe68770387",
+          "condition_id": null,
+          "required_assertions": [
+            "all_original_constraints_verified",
+            "authority_verified",
+            "evidence_applicability_verified"
+          ]
+        },
+        "resolver": "operator",
+        "stage": "BLOCKED",
+        "reason": "Native external restriction requires explicit qualified attestation",
+        "current_unblock_action": "Record authorised evidence satisfying every clause of native condition blocked:18424",
+        "wake_trigger": [
+          "dispatcher_tick",
+          "restart_reconciliation",
+          "wait_gate_satisfied",
+          "wait_gate_invalidated"
+        ]
+      }
+    ],
+    "continuation": {
+      "state": "todo",
+      "selected_next_action": {
+        "phase": "READY",
+        "type": "review_correction",
+        "action": "Apply only the reviewer-requested correction: Review772: prior case03/case10 corrections and all bundle SHA256/ZIP checks pass. Canonical inputs still omit substantive decision contracts (case01 replaces event11035 scope with original_scope_complete; case04 omits comment344's ten conditions) despite tools-disabled packet-only evaluation and no-truncation requirement. Supply bounded cited substantive scope/acceptance mappings and audit all ten. Resolve protocol gate_ids/rule_id namespace mismatch: private gates are absent from public packet entries while unsupported IDs must be rejected; define stable public gate/controller IDs and aligned labels/validation, with offline valid/invalid examples. Preserve historical authority; regenerate bundle/proposals and resubmit for separate all-ten adjudication and dated freeze. No inference, adviser, comparison, production action or whole-goal completion is authorised/requested.",
+        "review_run_id": 772,
+        "required_authority": null
+      }
+    },
+    "provenance": {
+      "source_contract_event": 18415,
+      "migration": "native-marker-only-v1",
+      "substantive_conditions_satisfied": false
+    },
+    "owned_fields": [
+      "status",
+      "block_kind",
+      "dispatch_eligible"
+    ]
+  }
+}

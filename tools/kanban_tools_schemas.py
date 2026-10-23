@@ -204,19 +204,11 @@ KANBAN_BLOCK_SCHEMA = _schema(
 
 KANBAN_SCHEDULE_SCHEMA = _schema(
     "kanban_schedule",
-    (
-        "Park your current task in the 'scheduled' state while it waits for "
-        "time or an external event. This ends the current run and makes the "
-        "task non-dispatchable until an orchestrator unblocks it; it does not "
-        "create a timer. Put any wake-up marker such as "
-        "``SCHEDULED_UNTIL=<ISO8601>`` in ``reason``."
-    ),
+    "End your current run with a native temporal wait. Set scheduled_at to a Unix timestamp; the dispatcher wakes it when due. Reason-only parking is an explicit unsupported workflow fault requiring a declared condition; prose is never parsed as a timer.",
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
-        "reason": _prop("string", (
-            "Optional reason or machine-readable wake-up marker recorded on "
-            "the completed run and scheduled event."
-        )),
+        "reason": _prop("string", "Optional explanation accompanying the native predicate."),
+        "scheduled_at": _prop("number", "Finite Unix timestamp for the actual temporal wake predicate."),
     },
     [],
 )
@@ -335,7 +327,7 @@ KANBAN_COMMENT_SCHEMA = _schema(
 KANBAN_ATTACH_SCHEMA = _schema(
     "kanban_attach",
     (
-        "Attach a file to a task by passing its bytes inline (base64). "
+        "Attach a local evidence file with file_path, or inline bytes with content_base64. Use exactly one. Local paths must be regular files inside the native task workspace; symlinks and protected paths are refused. File bytes stay out of model context. "
         "Use for genuine file artifacts the next worker or a human should "
         "be able to download — generated reports, images, exports. The "
         "file is stored as a real attachment (not a comment link) under "
@@ -348,13 +340,14 @@ KANBAN_ATTACH_SCHEMA = _schema(
                 "File name to store it under (e.g. 'report.pdf'). "
                 "Directory components are stripped; only the leaf is kept."
         )),
+        "file_path": _prop("string", "Absolute local artifact path within this task workspace. Preferred for generated evidence; filename defaults to its leaf."),
         "content_base64": {
             "type": "string",
             "description": "The file contents, base64-encoded. Max 25 MB decoded.",
         },
         "content_type": _prop("string", "Optional MIME type (e.g. 'application/pdf')."),
     },
-    ["filename", "content_base64"],
+    [],
 )
 
 KANBAN_ATTACH_URL_SCHEMA = _schema(
@@ -438,9 +431,10 @@ KANBAN_CREATE_SCHEMA = _schema(
             "type": "string",
             "enum": ["scratch", "dir", "worktree"],
             "description": (
-                "Workspace flavor: 'scratch' (fresh tmp dir, "
-                "default), 'dir' (shared directory, requires "
-                "absolute workspace_path), 'worktree' (git worktree)."
+                "Omit to use the operator's workspace default. With kanban.persistent_workdir, "
+                "only 'dir' is allowed, paths must stay under that folder, and files are retained. "
+                "Otherwise: 'scratch' (fresh temporary directory), 'dir' (persistent directory), "
+                "or 'worktree' (git worktree)."
             ),
         },
         "workspace_path": _prop("string", (
@@ -528,20 +522,6 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
     },
     ["title", "assignee"],
-)
-
-KANBAN_UNBLOCK_SCHEMA = _schema(
-    "kanban_unblock",
-    (
-        "Unblock a Kanban task. It moves to ready when all parents are done, "
-        "or todo while any parent remains open. Orchestrator-only — only "
-        "profiles with the kanban toolset can unblock routed work; "
-        "dispatcher-spawned task workers never see this tool."
-    ),
-    {
-        "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
-    },
-    ["task_id"],
 )
 
 KANBAN_LINK_SCHEMA = _schema(

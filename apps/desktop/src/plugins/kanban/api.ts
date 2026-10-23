@@ -464,6 +464,13 @@ export const reassignTask = (id: string, profile: string) =>
 
 export const reclaimTask = (id: string) => nudged(call(withBoard(`/tasks/${id}/reclaim`), { method: 'POST', body: {} }))
 
+/** Explicit operator Close of a BLOCKED card (blocked -> done). Distinct from
+ *  patchTask({status:'done'}), which runs the worker completion-evidence gate
+ *  and cannot be satisfied by a held card. The server refuses a live claim,
+ *  unsatisfied parents, or a PR/issue acceptance contract with a 409. */
+export const closeTask = (id: string, resolution?: string) =>
+  nudged(call(withBoard(`/tasks/${id}/close`), { method: 'POST', body: { resolution: resolution ?? null } }))
+
 export const uploadAttachment = (id: string, upload: { filename: string; contentType?: string; bytes: ArrayBuffer }) =>
   call(withBoard(`/tasks/${id}/attachments`), { method: 'POST', upload })
 

@@ -15,13 +15,59 @@ here may pull in a Hermes package that a project-local directory could shadow.
 
 from __future__ import annotations
 
+import os
+import sys
+
+
+def harden_import_path(src_root: str | None = None) -> None:
+    """Keep task files out of control-plane imports without changing tool cwd.
+
+    Module launches and PYTHONPATH may add an absolute workspace or its symlink
+    alias, not just the empty cwd entry. Remove those before any dependency
+    imports; even importlib.abc can import a workspace-shadowed stdlib module.
+    The installed source root remains trusted, including development launches.
+    """
+    root = src_root or os.environ.get("HERMES_PYTHON_SRC_ROOT") or os.path.dirname(
+        os.path.abspath(__file__)
+    )
+    root_real = os.path.normcase(os.path.realpath(root))
+    unsafe_roots = []
+    try:
+        unsafe_roots.append((os.getcwd(), False))
+    except FileNotFoundError:
+        pass  # The existing deleted-cwd recovery below still owns relocation.
+    workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
+    if workspace:
+        unsafe_roots.append((workspace, True))
+    unsafe_roots = [(os.path.normcase(os.path.realpath(p)), descendants) for p, descendants in unsafe_roots]
+
+    def trusted_entry(entry: str) -> bool:
+        if not entry or not os.path.isabs(entry):
+            return False
+        resolved = os.path.normcase(os.path.realpath(entry))
+        if resolved == root_real:
+            return False  # Reinsert the source root exactly once at the front.
+        for unsafe, descendants in unsafe_roots:
+            if unsafe == root_real:
+                continue
+            try:
+                if resolved == unsafe or (descendants and os.path.commonpath((resolved, unsafe)) == unsafe):
+                    return False
+            except ValueError:
+                continue  # Different Windows drives cannot be workspace children.
+        return True
+
+    sys.path[:] = [root, *(p for p in sys.path if trusted_entry(p))]
+
+
+# Run before importing any other stdlib dependencies, not only Hermes packages.
+harden_import_path()
+
 import errno
 import importlib.abc
 import importlib.util
-import os
 import selectors
 import socket
-import sys
 import time
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -431,26 +477,6 @@ def install_never_free_environ() -> None:
     os.putenv, os.unsetenv = _putenv, _unsetenv
 
 
-def harden_import_path(src_root: str | None = None) -> None:
-    """Stop a package in the current directory from shadowing Hermes modules.
-
-    Hermes ships top-level modules with common names (``utils``, ``proxy``, ``ui``); a
-    project with its own ``utils/`` launched from its directory would win the import.
-    The cwd reaches ``sys.path`` as ``""``/``"."`` (script/``-m`` launches) AND as an
-    absolute path (venv activation, PYTHONPATH), so both are handled: relative forms are
-    dropped and the Hermes root is *relocated* to the front, not merely inserted when
-    absent. ``src_root`` defaults to this module's directory (the repo root for every
-    shipped entry point), so no spawner env var is required.
-    """
-    root = src_root or os.environ.get("HERMES_PYTHON_SRC_ROOT") or os.path.dirname(
-        os.path.abspath(__file__)
-    )
-
-    sys.path[:] = [p for p in sys.path if p not in ("", ".")]
-
-    root_abs = os.path.abspath(root)
-    sys.path[:] = [p for p in sys.path if os.path.abspath(p) != root_abs]
-    sys.path.insert(0, root)
 
 
 def export_scratch_tmp_env() -> None:

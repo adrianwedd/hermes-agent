@@ -120,6 +120,44 @@ def _conn_uses_path(
     return False
 
 
+def _provably_empty_default_metadata_db(path: Path) -> bool:
+    """True only when *path* provably holds no board data at all.
+
+    ``kanban/boards/default/`` is the default board's *metadata* directory
+    (``board.json``, ``workspaces/``, ``logs/``) and the default board's store
+    normally lives at ``<root>/kanban.db`` — but a supported custom
+    ``HERMES_KANBAN_DB`` pin can point a real store anywhere, this path
+    included, so a path argument is never evidence on its own. Only provable
+    emptiness of the file may license skipping it.
+
+    Empty means all of: a regular (never symlinked) zero-byte file, and no
+    ``-wal``/``-journal``/``-shm`` sidecar of any kind —
+    a zero-byte main file can still carry committed frames in a WAL or hide a
+    hot journal. Any un-stat-able file or sidecar (``OSError``, including a
+    monkeypatched or permission failure) is uncertainty, not emptiness.
+
+    Everything else stays enumerated and therefore fails closed in both
+    callers. The file is never opened, initialised, repaired or removed.
+    """
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size != 0:
+            return False
+    except OSError:
+        return False
+    for suffix in ("-wal", "-journal", "-shm"):
+        sidecar = path.with_name(path.name + suffix)
+        if sidecar.is_symlink():
+            return False
+        try:
+            sidecar.stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        return False
+    return True
+
+
 def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     """Every other board's ``kanban.db``. Raises ``OSError`` when the set is unknown.
 
@@ -127,6 +165,18 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     slug onto the pinned file, so the scan uses the on-disk layout: the
     default board at ``<home>/kanban.db`` and named boards at
     ``<home>/kanban/boards/<slug>/kanban.db``.
+
+    One candidate is dropped, and only one: a *provably empty*
+    ``<boards_root>/default/kanban.db`` — see
+    :func:`_provably_empty_default_metadata_db`, whose emptiness test is the
+    whole licence. Leaving it in makes its schema-less read raise on every
+    ownership check, which both callers (``kanban_preparation.workspace_busy``
+    and this module's ``_workspace_in_use_by_other``) translate into
+    "ownership unknown": a preparation qualification is refused and every
+    workspace cleanup is deferred for a directory nothing owns. Every other
+    candidate is enumerated exactly as before, so a populated, corrupt or
+    unreadable store — including a real store under a custom
+    ``HERMES_KANBAN_DB`` pin — still fails closed.
     """
     from hermes_cli.kanban_db_connect import _main_db_file  # late: import cycle
 
@@ -135,9 +185,15 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     candidates = [_kb.kanban_home() / "kanban.db"]
     root = _kb.boards_root()
     if root.is_dir():
+        default_metadata_db = root / _kb.DEFAULT_BOARD / "kanban.db"
+        skip = _provably_empty_default_metadata_db(default_metadata_db)
         for child in root.iterdir():
-            if child.is_dir():
-                candidates.append(child / "kanban.db")
+            if not child.is_dir():
+                continue
+            candidate = child / "kanban.db"
+            if skip and candidate == default_metadata_db:
+                continue
+            candidates.append(candidate)
     found: list[Path] = []
     seen: set[Path] = set()
     for path in candidates:
@@ -365,6 +421,10 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     so cleanup never blocks completion. ``scratch`` is removed; ``worktree``
     only when provably free of work (clean tree, every commit reachable from a
     remote-tracking ref); ``dir`` is intentionally preserved."""
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    if persistent_root() is not None:
+        _cleanup_worker_tmux(conn, task_id)
+        return
     try:
         row = conn.execute(_WORKSPACE_ROW_SQL, (task_id,)).fetchone()
         if not row:
@@ -432,6 +492,9 @@ def _cleanup_worktree_workspace(
     ref; any doubt (dirty, unpushed, unresolvable repo, failing git) preserves
     it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
     branches are kept. Best-effort."""
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    if persistent_root() is not None:
+        return
     try:
         from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
     except Exception:
@@ -503,6 +566,9 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
 
     See #33774.
     """
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    if persistent_root() is not None:
+        return
     try:
         parents = conn.execute(
             "SELECT parent_id FROM task_links WHERE child_id = ?",
@@ -718,6 +784,10 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     every worktree lands under a board-owned repo (``<repo>/.worktrees/<id>``)
     instead of the dispatcher's incidental CWD (whatever dir the gateway was
     launched from); with no anchor configured we fail loudly rather than guess."""
+    from hermes_cli.kanban_persistent_workspace import execution_workspace
+    persistent = execution_workspace(task)
+    if persistent is not None:
+        return persistent, task.branch_name or ""
     branch_name = (task.branch_name or "").strip() or f"wt/{task.id}"
     if not task.workspace_path:
         board_slug = board if board else _kb.get_current_board()
@@ -795,6 +865,10 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     a concrete path is created/reused, none -> the board's ``default_workdir``
     (raises if unset rather than guessing). Persist via ``set_workspace_path``.
     """
+    from hermes_cli.kanban_persistent_workspace import execution_workspace
+    persistent = execution_workspace(task)
+    if persistent is not None:
+        return persistent
     kind = task.workspace_kind or "scratch"
     if kind == "worktree":
         return _resolve_worktree_workspace(task, board=board)[0]

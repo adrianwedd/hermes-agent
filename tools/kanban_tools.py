@@ -24,7 +24,7 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
-    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
+    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA)
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ def _check_kanban_mode() -> bool:
 
 @no_cache_check_fn
 def _check_kanban_orchestrator_mode() -> bool:
-    """Board-routing tools (kanban_list, kanban_unblock): hidden from task workers."""
+    """Read-only board routing for orchestrators; lifecycle release stays human-owned."""
     return _visible(to_env_worker=False)
 
 
@@ -483,7 +483,7 @@ _GOAL_GATE_MESSAGES = {
             "matching the card before requesting review.")}}
 
 
-def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
+def _goal_gate(tool_name: str, task, tid: str, evidence: str, *, goal_scope: str | None = None) -> None:
     """Goal-mode pre-handoff judge gate: a worker must not complete / request
     review before acceptance criteria are met. ``blocked`` gets its own
     guidance; any other non-``done`` verdict gets the ``continue`` guidance.
@@ -497,7 +497,7 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{tid}")
         try:
             verdict, reason, _, _, transport_failed = judge_goal(
-                goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip())
+                goal=goal_scope or f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip())
         finally:
             if affinity_token is not None:
                 reset_affinity_scope(affinity_token)
@@ -745,11 +745,21 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        from hermes_cli.kanban_completion_workflow import require_declared_contract
+        require_declared_contract(conn, tid)
+        from hermes_cli.kanban_review_transition import accept_bounded_review
+        phase = accept_bounded_review(conn, tid, summary or result, expected_run_id=_worker_run_id(tid))
+        if phase is not None:
+            _check(phase, "bounded review snapshot changed; preserve evidence and retry")
+            return _ok_landed(kb, conn, tid, "phase_accepted", phase_accepted=True, whole_goal_completed=False)
+        from hermes_cli.kanban_completion_evidence import prepare_gate
+        evidence_gate = prepare_gate(conn, tid, metadata, expected_run_id=_worker_run_id(tid))
+        _check(evidence_gate is not False, "completion evidence snapshot changed; preserve artifacts and retry the handoff")
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
-                created_cards=created_cards, expected_run_id=_worker_run_id(tid))
+                created_cards=created_cards, expected_run_id=_worker_run_id(tid), _prepared_evidence=evidence_gate)
         except kb.ArtifactPreservationError as artifact_err:
             # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
             # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
@@ -851,7 +861,7 @@ def _handle_block(args: dict, **kw) -> str:
 
 @_kanban_handler("kanban_schedule")
 def _handle_schedule(args: dict, **kw) -> str:
-    """Park the current task until an orchestrator re-gates it."""
+    """End the owned run with an encoded temporal predicate or unsupported fault."""
     tid = _worker_guard("kanban_schedule", args)
     raw_reason = args.get("reason")
     _check(raw_reason is None or isinstance(raw_reason, str), "reason must be a string")
@@ -865,7 +875,7 @@ def _handle_schedule(args: dict, **kw) -> str:
                f"in {sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} for a genuine external "
                "blocker, or kanban_complete so the completion judge can evaluate it.")
         ok = kb.schedule_task(
-            conn, tid, reason=reason, expected_run_id=_worker_run_id(tid))
+            conn, tid, reason=reason, scheduled_at=args.get("scheduled_at"), expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not schedule {tid} (unknown id or not in todo/ready/running/blocked)")
         return _ok_landed(kb, conn, tid, "scheduled", reason=reason)
 
@@ -897,7 +907,8 @@ def _handle_request_review(args: dict, **kw) -> str:
                f"reviewer profile {reviewer!r} is not installed. "
                f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
-        _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
+        # Requesting review is not completion. Keep the completion judge on
+        # kanban_complete, not before the independent review that supplies it.
         try:
             ok, fail_reason = kb.request_review(
                 conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
@@ -985,17 +996,10 @@ def _store_attachment(board, tid, filename, data, content_type) -> str:
 
 @_kanban_handler("kanban_attach")
 def _handle_attach(args: dict, **kw) -> str:
-    """Attach an inline (base64) file to a task."""
-    tid = _worker_guard("kanban_attach", args)
-    filename = _require_text(args, "filename")
-    content_b64 = _require_text(args, "content_base64")
-    import base64
-    import binascii
-    try:
-        data = base64.b64decode(str(content_b64), validate=True)
-    except (binascii.Error, ValueError) as e:
-        raise _Reject(f"content_base64 is not valid base64: {e}")
-    return _store_attachment(args.get("board"), tid, filename, data, args.get("content_type"))
+    """Attach bounded evidence through the native worker owner interface."""
+    from tools.kanban_attachment_payload import attach_payload
+    return attach_payload(args)
+
 
 
 _MAX_ATTACH_URL_REDIRECTS = 5
@@ -1127,7 +1131,8 @@ def _handle_create(args: dict, **kw) -> str:
                       or (self_task.session_id if self_task else None)
                       or _persisted_session_id(_current_origin_session_id())
                       or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))
-        if project_id is None and workspace_kind is None and workspace_path is None:
+        from hermes_cli.kanban_persistent_workspace import persistent_root
+        if persistent_root() is None and project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
         new_tid = kb.create_task(
@@ -1257,20 +1262,6 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
         return False
 
 
-@_kanban_handler("kanban_unblock")
-def _handle_unblock(args: dict, **kw) -> str:
-    """Transition a blocked task to ready, or todo while parents remain open."""
-    _reject_delegated_child_mutation("kanban_unblock")
-    _require_orchestrator_tool("kanban_unblock")
-    tid = args.get("task_id")
-    _check(tid, "task_id is required")
-    tid = str(tid)
-    _enforce_worker_task_ownership(tid)
-    with _board(args.get("board")) as (kb, conn):
-        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
-        return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
-
-
 @_kanban_handler("kanban_link")
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact (cycles/self-links/running
@@ -1290,8 +1281,9 @@ def _handle_link(args: dict, **kw) -> str:
 
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
-# kanban_list / kanban_unblock route the board and are hidden from task workers.
-_ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_unblock"})
+# Listing is read-only. Releasing a blocked card is intentionally absent from
+# every model-visible toolset; humans/control-plane code use the native CLI/UI.
+_ORCHESTRATOR_TOOLS = frozenset({"kanban_list"})
 _TOOLS = (
     ("kanban_show", KANBAN_SHOW_SCHEMA, _handle_show, "📋"),
     ("kanban_list", KANBAN_LIST_SCHEMA, _handle_list, "📋"),
@@ -1306,7 +1298,6 @@ _TOOLS = (
     ("kanban_attach_url", KANBAN_ATTACH_URL_SCHEMA, _handle_attach_url, "📎"),
     ("kanban_attachments", KANBAN_ATTACHMENTS_SCHEMA, _handle_attachments, "📎"),
     ("kanban_create", KANBAN_CREATE_SCHEMA, _handle_create, "➕"),
-    ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:

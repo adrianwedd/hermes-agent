@@ -316,10 +316,11 @@ KANBAN_GUIDANCE = (
     "card body must carry the decisions it depends on, because workers cannot see sibling context.\n"
     "\n"
     "## Reference details that change outcomes\n\n"
-    "- **Workspace.** `cd $HERMES_KANBAN_WORKSPACE` first. For a `worktree` kind with no `.git`, `git worktree add "
-    "<path> ${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_TASK}` from the main repo, then cd there. For a project-linked "
-    "task the workspace is a fresh `<repo>/.worktrees/<task-id>` and `$HERMES_KANBAN_BRANCH` a deterministic "
-    "`<project-slug>/<task-id>` — the main repo is two levels up, so run `git worktree add` from there.\n"
+    "- **Workspace.** `cd \"$HERMES_KANBAN_WORKSPACE\"` first. The dispatcher owns workspace resolution. "
+    "If that directory is unavailable, report the infrastructure failure; do not create a replacement scratch "
+    "directory or Git worktree, or infer a repository from ancestor directories. Retain task files.\n"
+    "- **Board safety.** New production boards require explicit operator authorization. Run probes through "
+    "`scripts/run_kanban_probe.py` with an isolated temporary home; never detach probes or bypass board guards.\n"
     "- **Deliverables.** Files a human wants go in `kanban_complete(artifacts=[<absolute paths>])` (top-level param; "
     "paths in `metadata` are NOT uploaded). Files must exist at completion.\n"
     "- **Attachments.** Attach real downloadable artifacts instead of pasting links in comments: `kanban_attach` "
@@ -930,9 +931,26 @@ def _local_host_hints() -> list[str]:
         pass
     # The model reaches for the system temp dir by reflex (tmpfs on most Linux hosts, fills RAM);
     # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.
+    # State the process's ACTUAL temp dir: export_scratch_tmp_env() deliberately leaves an OS-provided
+    # TMPDIR alone (macOS /var/folders, Windows %TEMP%), so claiming TMPDIR always points at the scratch
+    # dir is false on those hosts and misleads the model about where `tempfile`/`mktemp` write.
     try:
-        host_lines.append(f"Scratch directory: {get_scratch_dir()} (TMPDIR points here; write temporary files "
-                          "and probes there, never under the system temp dir; entries idle for 24h are pruned)")
+        scratch_dir = get_scratch_dir()
+        import tempfile as _tempfile
+        process_tmp = _tempfile.gettempdir()
+        same = os.path.realpath(process_tmp) == os.path.realpath(str(scratch_dir))
+        tmp_note = (
+            "TMPDIR points here"
+            if same
+            else f"TMPDIR is {process_tmp}, NOT this directory, so tempfile/mktemp land there; "
+                 "name this directory explicitly for scratch files"
+        )
+        host_lines.append(
+            f"Scratch directory: {scratch_dir} ({tmp_note}; write temporary files "
+            "and probes there, never under the system temp dir; entries idle for 24h are pruned). "
+            "When a repository is assigned, keep project work and investigation artefacts in a "
+            "gitignored directory INSIDE that repository, and use the scratch directory only as a fallback."
+        )
     except OSError:
         pass
     if not (sys.platform == "win32" and not is_wsl()):

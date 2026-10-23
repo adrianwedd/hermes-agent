@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from tests.tools.kanban_worker_fixtures import completion_metadata, source_layout as source_layout, worker_env as worker_env
 
 
 # ---------------------------------------------------------------------------
@@ -40,35 +41,6 @@ def test_kanban_tools_hidden_without_env_var(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # Handler happy paths
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def worker_env(monkeypatch, tmp_path):
-    """Simulate being a worker: HERMES_HOME isolated, HERMES_KANBAN_TASK set
-    after we've created the task."""
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
-    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
-    from pathlib import Path as _Path
-    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
-
-    from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_db_connect as kbc
-    kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
-    conn = kbc.connect()
-    try:
-        tid = kb.create_task(conn, title="worker-test", assignee="test-worker")
-        kb.claim_task(conn, tid)
-        run_id = kb._current_run_id(conn, tid)
-    finally:
-        conn.close()
-    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
-    # A real dispatcher always pins the worker's run id; simulate that so the
-    # run-lifecycle tools can prove ownership (see test_unbound_worker_cannot_mutate_card).
-    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
-    return tid
 
 
 def test_show_defaults_to_env_task_id(worker_env):
@@ -381,11 +353,18 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
     conn = kbc.connect()
     try:
         goal_task_id = kb.create_task(
-            conn, title="goal-mode-test", assignee="test-worker",
+            conn, title="goal-mode-test", assignee="unit-implementer",
             body="Must achieve X with verified evidence.", goal_mode=True
         )
+        monkeypatch.setenv("HERMES_PROFILE", "unit-implementer")
         kb.claim_task(conn, goal_task_id)
-        run_id = kb._current_run_id(conn, goal_task_id)
+        implementation_run = kb._current_run_id(conn, goal_task_id)
+        assert kb.request_review(conn, goal_task_id, summary="Unit fixture independent handoff",
+                                 reviewer="test-worker", expected_run_id=implementation_run)
+        monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+        review = kb.claim_review_task(conn, goal_task_id)
+        assert review is not None
+        run_id = review.current_run_id
     finally:
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
@@ -402,7 +381,9 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
     monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
 
     # Attempt to complete should be rejected
-    out = kt._handle_complete({"summary": "I did some stuff but not X"})
+    with kbc.connect() as evidence_conn:
+        metadata = completion_metadata(evidence_conn, goal_task_id)
+    out = kt._handle_complete({"summary": "I did some stuff but not X", "metadata": metadata})
     d = json.loads(out)
     assert "error" in d
     assert "Goal completion rejected by judge" in d["error"]
@@ -445,14 +426,17 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
 
     assert out == {
         "ok": True, "task_id": worker_env, "run_id": out["run_id"],
-        "status": "scheduled", "reason": reason,
+        "status": "todo", "reason": reason,
     }
     with kbc.connect() as conn:
-        assert kb.get_task(conn, worker_env).status == "scheduled"
+        assert kb.get_task(conn, worker_env).status == "todo"
+        from hermes_cli.kanban_decision import decide
+        decision = decide(conn, kb.get_task(conn, worker_env))
+        assert decision["evaluation_mode"] == "unsupported" and not decision["dispatchable"]
         run = kb.latest_run(conn, worker_env)
         assert (run.outcome, run.summary) == ("scheduled", reason)
         assert any(
-            event.kind == "scheduled" and event.payload == {"reason": reason}
+            event.kind == "scheduled" and event.payload["reason"] == reason and event.payload["scheduled_at"] is None
             for event in kb.list_events(conn, worker_env)
         )
 
@@ -796,7 +780,7 @@ def test_link_running_child_allows_owner_but_rejects_foreign(monkeypatch, worker
         assert kb.parent_ids(conn, foreign_child) == []
 
 
-def test_unblock_happy_path(monkeypatch, worker_env):
+def test_operator_unblock_happy_path(monkeypatch, worker_env):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
@@ -807,11 +791,11 @@ def test_unblock_happy_path(monkeypatch, worker_env):
     finally:
         conn.close()
 
-    from tools import kanban_tools as kt
-    out = kt._handle_unblock({"task_id": tid})
-    d = json.loads(out)
-    assert d["ok"] is True
-    assert d["status"] == "ready"
+    # Workers no longer expose generic unblock; exercise the supported operator
+    # API without weakening its native predicate checks.
+    with kbc.connect() as operator:
+        assert kb.unblock_task(operator, tid)
+        assert kb.get_task(operator, tid).status == "ready"
 
     conn = kbc.connect()
     try:
@@ -820,7 +804,7 @@ def test_unblock_happy_path(monkeypatch, worker_env):
         conn.close()
 
 
-def test_unblock_with_pending_parents_returns_todo(monkeypatch, tmp_path):
+def test_operator_unblock_with_pending_parents_returns_todo(monkeypatch, tmp_path):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -842,11 +826,9 @@ def test_unblock_with_pending_parents_returns_todo(monkeypatch, tmp_path):
     finally:
         conn.close()
 
-    from tools import kanban_tools as kt
-    out = kt._handle_unblock({"task_id": child})
-    d = json.loads(out)
-    assert d["ok"] is True
-    assert d["status"] == "todo"
+    with kbc.connect() as operator:
+        assert kb.unblock_task(operator, child)
+        assert kb.get_task(operator, child).status == "todo"
 
     conn = kbc.connect()
     try:
@@ -925,8 +907,7 @@ def test_worker_lifecycle_through_tools(worker_env):
 # ---------------------------------------------------------------------------
 #
 # A worker process has HERMES_KANBAN_TASK set to its own task id. The
-# destructive tools (kanban_complete, kanban_block, kanban_heartbeat,
-# kanban_unblock) must refuse to operate
+# destructive tools (kanban_complete, kanban_block, kanban_heartbeat) must refuse to operate
 # on any OTHER task id, even if the caller supplies an explicit `task_id`
 # argument. Workers legitimately call kanban_show / kanban_list /
 # kanban_comment / kanban_create / kanban_link on other tasks, so those
@@ -1000,36 +981,14 @@ def test_worker_can_comment_on_foreign_task(worker_env):
         conn.close()
 
 
-def test_worker_unblock_rejects_foreign_task_id(worker_env):
-    """A worker cannot unblock any task — kanban_unblock is orchestrator-only.
+def test_unblock_is_not_model_visible_for_any_kanban_profile(worker_env):
+    """Dispatch release belongs to the human/control plane, never an LLM toolset."""
+    from tools import kanban_tools  # noqa: F401 — ensure registration
+    from tools.registry import registry
+    from toolsets import resolve_toolset
 
-    The check fires before the per-task ownership check, so the error
-    surface is the orchestrator-only refusal rather than the
-    cross-task-ownership refusal. Either is fine — the property we're
-    pinning is "worker cannot mutate foreign task via kanban_unblock".
-    """
-    from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_db_connect as kbc
-    conn = kbc.connect()
-    try:
-        other = kb.create_task(conn, title="blocked sibling", assignee="peer")
-        kb.block_task(conn, other, reason="waiting")
-    finally:
-        conn.close()
-
-    from tools import kanban_tools as kt
-    out = kt._handle_unblock({"task_id": other})
-    d = json.loads(out)
-    err = d.get("error", "")
-    assert "orchestrator-only" in err or "refusing to mutate" in err, (
-        f"expected worker-rejection error, got {err}"
-    )
-
-    conn = kbc.connect()
-    try:
-        assert kb.get_task(conn, other).status == "blocked"
-    finally:
-        conn.close()
+    assert registry.get_entry("kanban_unblock") is None
+    assert "kanban_unblock" not in resolve_toolset("kanban")
 
 
 def test_orchestrator_complete_any_task_allowed(monkeypatch, tmp_path):

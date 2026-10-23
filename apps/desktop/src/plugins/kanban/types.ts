@@ -1,9 +1,103 @@
+export interface RecordedTokenUsage {
+  uncached_input?: null | number
+  cache_read?: null | number
+  cache_write?: null | number
+  total: number
+  input: number
+  output: null | number
+  counters_complete?: boolean
+  partial: boolean
+  scope: string
+  recorded_runs?: number
+  missing_runs?: number
+}
+
+export interface RecordedRoute {
+  provider: string; model: string; observed_at?: number | null
+  aggregator?: { provider: string; model: string } | null
+  advisers?: { provider: string; model: string }[]
+}
+export interface RunRouteReceipt {
+  run_id: number; agent: string; started_at: number; ended_at?: number | null
+  launch: RecordedRoute | null; last_observed: RecordedRoute | null; basis: string
+}
+
+export interface DeliveryReceipt {
+  repository: string; commit_sha: string | null; branch: string | null
+  remote_branch_head: string | null; push_status: 'verified' | 'reported_unverified' | 'unknown'
+  remote_branch_checked_at?: string | null
+  pr_url: string | null; pr_head_sha: string | null; pr_verified: boolean
+  pr_state: string | null; pr_draft: boolean | null; issue_url: string | null
+  acceptance: string | null; acceptance_basis: string; checked_at: string | null
+  source: { attachment_id: number; filename: string; sha256: string; basis: string }
+}
+export interface KanbanCardFacts {
+  dispatch?: {
+    eligible?: boolean
+    terminal?: boolean
+    /** Canonical derived state: TRIAGE/PREPARE/READY/RUNNING/REVIEW/OPERATOR/WAITING/
+     *  BLOCKED/HELD/DONE/SUPERSEDED. The board files the card by `column`. */
+    stage?: string
+    dispatchable?: boolean
+    column?: string
+    label: string
+    reason: string
+    owner?: string | null
+    next_action?: string | null
+    current_unblock_action?: string | null
+    post_gate_continuation?: { state: string; selected_next_action?: { action?: string } | null } | null
+    state_if_satisfied_now?: { state: string; reason: string; dispatchable: boolean }
+    evaluation_mode?: string
+    wake_trigger?: string[]
+    basis: string
+  }
+  delivery?: DeliveryReceipt | null
+  run_routes?: { selected: RunRouteReceipt | null; history: RunRouteReceipt[]; planned_agent: string; historical_inference: false }
+  tokens?: { current: null | RecordedTokenUsage; cumulative: null | RecordedTokenUsage; coverage: string }
+  blocker: null | { label: string; detail: string }
+  progress: null | { text: string; at?: null | number; basis: string }
+  heartbeat_at?: null | number
+  model: { primary: string; advisers: string[]; basis: string }
+}
+
 /** The slice of the kanban REST contract the board renders. The backend
  *  (`plugins/kanban/dashboard/plugin_api.py`) returns much more per task; we
  *  type only what the UI reads so a schema addition never breaks the build. */
 
+/** The canonical outcome of an operator Ready override (dashboard ready-with-override
+ *  / `hermes kanban promote --force`). ``ready`` is the kernel's own verdict, not the
+ *  requested status: a release can be recorded while the card is still not runnable. */
+export interface ReleaseOutcome {
+  ready?: boolean
+  applied?: boolean
+  already_clear?: boolean
+  /** Set to ``done``/``archived``/``review`` when the release reopened a terminal or
+   *  review card (the prior completion is preserved on the card as audit provenance). */
+  reopened_from?: null | string
+  /** Present when the release reclaimed a live claim; ``reclaimed`` is true only once
+   *  the worker is gone (a surviving worker keeps its claim and the release refuses). */
+  reclaimed?: null | { reclaimed?: boolean; prev_status?: null | string; prev_pid?: null | number }
+  status?: null | string
+  workflow_stage?: null | string
+  dispatchable?: boolean
+  released_gates?: string[]
+  waived_dependencies?: string[]
+  summary?: string
+}
+
+/** The backend's upgrade marker on a plain Move-to-Ready that the kernel completed as
+ *  the audited operator dispatch release (machine-generated reason, zero user input).
+ *  The response also carries the release's canonical outcome as `release`. */
+export interface AutoRelease {
+  auto_release: boolean
+}
+
 /** One card. `status` is the column id (see COLUMN_META). */
 export interface KanbanTask {
+  dispatch_eligible?: boolean
+  task_estimate?: null | TaskEstimate
+  card_facts?: KanbanCardFacts
+  last_failure_error?: null | string
   id: string
   title: string
   body?: null | string
@@ -19,6 +113,9 @@ export interface KanbanTask {
   progress?: null | { done: number; total: number }
   /** Compact diagnostics rollup — present only when a card has warnings. */
   warnings?: null | { count: number; highest_severity?: null | string }
+  /** Full diagnostic list. The backend withholds it for terminal statuses; the
+   *  drawer renders it, and it is typed here because the board payload carries it. */
+  diagnostics?: Diagnostic[]
   /** Worker liveness (present on running cards) — drives the arc + run clock. */
   started_at?: null | number
   /** Start of the CURRENT run row; null/absent when the task has no active
@@ -195,6 +292,11 @@ export interface KanbanProject {
 
 /** POST /tasks/:id/estimate — rough auxiliary-model estimate (never dollars). */
 export interface TaskEstimate {
+  created_at?: number
+  scope_sha256?: string
+  stale_scope?: boolean
+  attachment_id?: number
+  provenance?: { source: string; trigger: string; actor: string; auxiliary_task: string }
   ok: boolean
   reason?: null | string
   est_tokens?: number
@@ -242,6 +344,10 @@ export const COLUMN_META: Record<string, { codicon: string; tone: string }> = {
   scheduled: { codicon: 'watch', tone: '#a78bfa' },
   ready: { codicon: 'play-circle', tone: '#60a5fa' },
   running: { codicon: 'sync', tone: '#34d399' },
+  execution: { codicon: 'tools', tone: '#fb923c' },
+  workflow: { codicon: 'tools', tone: '#fb923c' },
+  held: { codicon: 'debug-pause', tone: '#94a3b8' },
+  operator: { codicon: 'person', tone: '#fbbf24' },
   blocked: { codicon: 'error', tone: '#f87171' },
   review: { codicon: 'eye', tone: '#fbbf24' },
   done: { codicon: 'pass', tone: 'var(--ui-text-tertiary)' },

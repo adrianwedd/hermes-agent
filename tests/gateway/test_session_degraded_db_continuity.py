@@ -65,6 +65,22 @@ def _make_gateway_agent(session_db):
 
 
 class TestEnsureDbSessionPersistsRoutingIdentity:
+    def test_dispatched_worker_row_carries_board_provenance(self, tmp_path):
+        from hermes_state import SessionDB
+        from run_agent import AIAgent
+
+        db = SessionDB(tmp_path / "worker-state.db")
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key", "HERMES_SESSION_SOURCE": "kanban",
+                                  "HERMES_KANBAN_TASK": "task-a", "HERMES_KANBAN_BOARD": "board-a"}):
+            agent = AIAgent(api_key="test-key", base_url="https://openrouter.ai/api/v1",
+                            model="test/model", quiet_mode=True, session_db=db,
+                            session_id="worker-board-stamp", skip_context_files=True, skip_memory=True)
+            agent._ensure_db_session()
+        row = db.get_session("worker-board-stamp")
+        assert row["source"] == "kanban"
+        assert json.loads(row["origin_json"]) == {"kanban_board": "board-a", "kanban_task": "task-a"}
+        db.close()
+
     def test_lazy_creation_writes_session_key_and_chat_identity(self):
         """First-created row must carry gateway routing metadata (not identity-less)."""
         from hermes_state import SessionDB

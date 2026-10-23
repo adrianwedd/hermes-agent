@@ -114,8 +114,11 @@ def decompose_triage_task(
     # (create_task, link_tasks, add_comment) must not be called in here.
     now = int(time.time())
     with write_txn(conn):
+        from hermes_cli.kanban_completion_workflow import operator_contract_pending
+        if operator_contract_pending(conn, task_id):
+            return None
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, project_id "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
@@ -173,38 +176,67 @@ def _insert_decomposed_child(
     """Insert one decomposed child as ``todo`` (linked under the root later so
     the dispatcher only ever sees a coherent graph); returns its id.
 
-    Workspace: per-child override wins, else inherit the root's kind. Path
-    inherits only when kinds match (a 'dir' child must not point at the
-    root's worktree) and NEVER for worktrees — siblings dispatch concurrently
-    and one shared checkout would put them all on the first sibling's branch
-    with no lock; leaving it unset makes dispatch materialize a fresh
-    ``<repo>/.worktrees/<child-id>`` per child from the board anchor.
+    Without the persistent policy, per-child override wins, else the root's
+    compatible non-worktree workspace is inherited. With the policy, children
+    use the ordinary creation resolver: local children stay under the configured
+    root and project children keep the association but use the canonical repo.
+    Existing legacy rows remain executable in place; their secondary workspace
+    is never relabelled as the placement for a new child.
     """
     from hermes_cli.kanban_db import (
         _new_task_id, _canonical_assignee, _append_event,
     )
 
-    root_ws_kind = root_row["workspace_kind"] or "scratch"
-    child_ws_kind = child.get("workspace_kind") or root_ws_kind
-    if child.get("workspace_path"):
-        child_ws_path = child.get("workspace_path")
-    elif child_ws_kind == "worktree":
-        child_ws_path = None
-    elif child_ws_kind == root_ws_kind:
-        child_ws_path = root_row["workspace_path"]
+    from hermes_cli.kanban_persistent_workspace import (
+        persistent_root, resolve_new_task_workspace,
+        _normalize_workspace_path, _validate_workspace_pair,
+    )
+    if persistent_root() is not None:
+        root_project_id = root_row["project_id"] or ""
+        try:
+            (
+                child_ws_kind, child_ws_path, _branch_name, child_project_id,
+                _project_obj, _project_repo,
+            ) = resolve_new_task_workspace(
+                conn,
+                child.get("workspace_kind"),
+                child.get("workspace_path"),
+                root_project_id,
+                root_id if root_project_id else None,
+                None,
+                None,
+            )
+        except ValueError as exc:
+            raise ValueError(f"child[{child.get('title')!r}]: {exc}") from None
     else:
-        child_ws_path = None
+        child_project_id = None
+        root_ws_kind = root_row["workspace_kind"] or "scratch"
+        child_ws_kind = child.get("workspace_kind") or root_ws_kind
+        if child.get("workspace_path"):
+            child_ws_path = _normalize_workspace_path(child.get("workspace_path"))
+        elif child_ws_kind == "worktree":
+            child_ws_path = None
+        elif child_ws_kind == root_ws_kind:
+            child_ws_path = _normalize_workspace_path(root_row["workspace_path"])
+        else:
+            child_ws_path = None
+        # A child asking for a legacy 'dir' workspace must name one. Reject,
+        # rather than inventing a scratch path, so the outer fan-out rolls back.
+        try:
+            _validate_workspace_pair(child_ws_kind, child_ws_path)
+        except ValueError as exc:
+            raise ValueError(f"child[{child.get('title')!r}]: {exc}") from None
     new_id = _new_task_id()
     body = child.get("body")
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "
-        " workspace_path, tenant, created_at, created_by) "
-        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+        " workspace_path, project_id, tenant, created_at, created_by) "
+        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
         (
             new_id, child["title"].strip(), body if isinstance(body, str) else None,
             _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path,
-            root_row["tenant"], now, (author or "decomposer"),
+            child_project_id, root_row["tenant"], now, (author or "decomposer"),
         ),
     )
     _append_event(

@@ -721,6 +721,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     :func:`kanban_db_path` (``HERMES_KANBAN_DB`` -> ``HERMES_KANBAN_BOARD`` ->
     ``<root>/kanban/current`` -> ``default``)."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    from hermes_cli.kanban_board_authorization import require_board_database
+    require_board_database(path)
     from agent.delegation_context import kanban_path_is_fenced
     if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
@@ -808,6 +810,8 @@ def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> P
     (tests writing legacy event kinds, external upgrades) use it to force it."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     _refuse_dead_board_resurrection(path, board)
+    from hermes_cli.kanban_board_authorization import require_board_database
+    require_board_database(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Clear the cache entry so connect() re-runs schema + migrations.
     with _INIT_LOCK:
@@ -880,6 +884,7 @@ _LATER_TASK_COLUMNS = (
     # Ralph-style goal loop toggle; 0 = classic single-shot worker.
     ("goal_mode", "goal_mode INTEGER NOT NULL DEFAULT 0"),
     ("goal_max_turns", "goal_max_turns INTEGER"),
+    ("dispatch_eligible", "dispatch_eligible INTEGER NOT NULL DEFAULT 1"),
     ("completion_contract", "completion_contract TEXT"),
     ("session_id", "session_id TEXT"),
     # Typed block reason (VALID_BLOCK_KINDS); NULL = generic human blocker.
@@ -1272,7 +1277,10 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
 
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
+        from hermes_cli.kanban_mutation_requests import before_write, before_commit, after_commit
+        checked = before_write(conn)
         yield conn
+        before_commit(conn, checked)
     except Exception:
         # SQLite may already have auto-rolled-back (EIO, contention, corruption);
         # don't let this secondary failure shadow the real one.
@@ -1282,6 +1290,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     else:
         try:
             _execute_boundary_with_retry(conn, "COMMIT")
+            after_commit(checked)
         except Exception:
             # COMMIT exhausted retries with the txn still open; roll back so the
             # connection isn't poisoned for the next BEGIN IMMEDIATE.

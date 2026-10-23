@@ -32,6 +32,7 @@ from hermes_cli.kanban_boards import _dispatch_boards
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
 )
+from hermes_cli.kanban_completion_command import declare_requirements as _cmd_requirements
 from hermes_cli.kanban_parser import build_parser
 
 
@@ -207,8 +208,8 @@ def _profile_author() -> str:
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
-    "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
-    "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
+    "completion-requirements", "administrative-pending", "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
+    "wait", "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
     "gc",
@@ -825,7 +826,7 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
         return None
 
 
-def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
+def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str, *, goal_scope: Optional[str] = None):
     """Goal judge for every terminal worker handoff (including review).
 
     Returns ``(verdict, reason_or_None)``: ``"done"`` allows; ``"blocked"`` = judge ruled the goal
@@ -858,7 +859,7 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{task.id}")
         try:
             verdict, reason, _, _, transport_failed = judge_goal(
-                goal=f"{task.title}\n\n{task.body or ''}".strip(),
+                goal=goal_scope or f"{task.title}\n\n{task.body or ''}".strip(),
                 last_response=evidence.strip())
         finally:
             if affinity_token is not None:
@@ -883,7 +884,13 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
     """Goal-mode judge gate shared by ``complete`` / ``request-review`` (mirrors tools/kanban_tools.py);
     applied to every terminal handoff so request-review can't bypass it. Returns the error line, or
     None to allow."""
-    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence)
+    # Only review entry uses the declared bounded target. Completion must still
+    # prove the whole goal; future authority and comparison gates are retained.
+    goal_scope = None
+    if handoff == "review handoff":
+        from hermes_cli.kanban_review_transition import bounded_review_goal
+        goal_scope = bounded_review_goal(conn, tid)
+    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence, **({"goal_scope": goal_scope} if goal_scope else {}))
     if verdict == "blocked":
         return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
                 f"the goal unachievable — {rejection}. {blocked_hint}")
@@ -910,6 +917,18 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
+            from hermes_cli.kanban_completion_workflow import require_declared_contract
+            from hermes_cli.kanban_completion_evidence import CompletionEvidenceError
+            try:
+                require_declared_contract(conn, tid)
+                from hermes_cli.kanban_completion_evidence import prepare_gate
+                evidence_gate = prepare_gate(conn, tid, metadata, expected_run_id=_worker_run_id_for(tid), force=bool(getattr(args, "force", False)))
+                if evidence_gate is False:
+                    fail_msg[tid] = "completion evidence snapshot changed; retry handoff"
+                    return False
+            except CompletionEvidenceError as exc:
+                fail_msg[tid] = str(exc)
+                return False
             gate_err = _goal_gate_error(
                 conn, tid, (summary or args.result or "").strip(), "completion",
                 "Re-scope with kanban edit, or record the block with kanban block instead of completing.",
@@ -921,7 +940,10 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         expected_run_id=_worker_run_id_for(tid),
-                                        force=bool(getattr(args, "force", False)))
+                                        force=bool(getattr(args, "force", False)), _prepared_evidence=evidence_gate)
+            except CompletionEvidenceError as exc:
+                fail_msg[tid] = str(exc)
+                return False
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
@@ -1013,7 +1035,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
         op = _commented(conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
-            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid)))
+            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid), scheduled_at=args.at))
         return _bulk_apply(ids, op, lambda tid: f"Scheduled {tid}{suffix}", lambda tid: f"cannot schedule {tid}")
 
 
@@ -1039,12 +1061,8 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
     if rc:
         return rc
     with kbc.connect_closing() as conn:
-        gate_err = _goal_gate_error(
-            conn, tid, summary or "", "review handoff",
-            "Record the block with kanban block instead of requesting review.",
-            "Provide acceptance evidence matching the task.")
-        if gate_err:
-            return _err(gate_err)
+        # Review obtains independent acceptance; it must not require final
+        # goal completion first. Native ownership/artifact checks still apply.
         ok, reason = kb.request_review(
             conn, tid, summary=summary, metadata=metadata, reviewer=getattr(args, "reviewer", None),
             expected_run_id=_worker_run_id_for(tid), force=bool(getattr(args, "force", False)), with_reason=True)
@@ -1088,16 +1106,47 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
                            lambda tid: f"cannot reopen {tid} (not in review?)")
 
 
+def _assert_dry_run_not_supported(dry_run: int) -> None:
+    """Reject the unsupported legacy flag combination without mutating state."""
+    if not dry_run:
+        return
+    raise ValueError(
+        "promote --force --dry-run is unsupported; inspect the card and use "
+        "the specific authorised transition for its actual hold"
+    )
+
+
 def _cmd_promote(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     author = _profile_author()
     # Dedupe while preserving order; positional task_id always first.
     ids = list(dict.fromkeys(_bulk_ids(args)))
     dry_run = bool(args.dry_run)
+    force = bool(getattr(args, "force", False))
 
     results: list[dict[str, object]] = []
     with kbc.connect_closing() as conn:
         for tid in ids:
+            if force:
+                # Legacy compatibility only: a reason cannot supply authority to
+                # revoke a hold or reclaim another worker's claim.
+                from hermes_cli.kanban_dispatch_release import release
+                try:
+                    _assert_dry_run_not_supported(int(getattr(args, "dry_run", False)))
+                    # An empty reason still refuses; no gate is released here.
+                    outcome = release(conn, tid, reason=reason or "")
+                    # Keep the canonical no-op outcome visible to JSON callers.
+                    results.append({"task_id": tid, "promoted": bool(outcome["ready"]),
+                                    "ready": bool(outcome["ready"]),
+                                    "applied": bool(outcome["applied"]),
+                                    "dry_run": dry_run, "reason": reason,
+                                    "error": None if outcome["ready"] else outcome["summary"],
+                                    **outcome})
+                except (ValueError, PermissionError, RuntimeError) as exc:
+                    results.append({"task_id": tid, "promoted": False, "ready": False,
+                                    "applied": False, "dry_run": dry_run, "reason": reason,
+                                    "error": f"{type(exc).__name__}: {exc}"})
+                continue
             ok, err = kb.promote_task(conn, tid, actor=author, reason=reason, dry_run=dry_run)
             results.append({"task_id": tid, "promoted": ok, "dry_run": dry_run,
                             "reason": reason, "error": err})
@@ -1113,7 +1162,10 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     suffix = f": {reason}" if reason else ""
     for r in results:
         if r["promoted"]:
-            print(f"{label} {r['task_id']} -> ready{tag}{suffix}")
+            if force:
+                print(f"Already ready {r['task_id']} (no release performed)")
+            else:
+                print(f"{label} {r['task_id']} -> ready{tag}{suffix}")
         else:
             print(f"cannot promote {r['task_id']}: {r['error']}", file=sys.stderr)
     return 0 if not failed else 1
@@ -1132,6 +1184,29 @@ def _cmd_archive(args: argparse.Namespace) -> int:
                                lambda tid: f"cannot delete {tid} (must already be archived)")
         return _bulk_apply(ids, lambda tid: kb.archive_task(conn, tid),
                            lambda tid: f"Archived {tid}", lambda tid: f"cannot archive {tid}")
+
+
+def _cmd_close(args: argparse.Namespace) -> int:
+    """Explicit operator Close for blocked cards: blocked -> done.
+
+    Distinct from ``complete`` on purpose: complete runs the worker evidence
+    gate (a completion manifest plus an accepted command run) which a blocked
+    card can never satisfy, so it is not a usable operator action on a held
+    card. ``close`` is the human resolution -- it records ``--resolution`` as
+    the card's result and a ``resolved`` event, and refuses a live worker claim,
+    unsatisfied parents, or a PR/issue acceptance contract.
+    """
+    ids, rc = _require_ids(args)
+    if rc:
+        return rc
+    resolution = (getattr(args, "resolution", None) or "").strip() or None
+    with kbc.connect_closing() as conn:
+        return _bulk_apply(
+            ids,
+            lambda tid: kb.close_task(conn, tid, summary=resolution),
+            lambda tid: f"Closed {tid} (blocked -> done)",
+            lambda tid: f"cannot close {tid} (not blocked, live claim, or unsatisfied parents)",
+        )
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:
@@ -1317,7 +1392,12 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
                              ("task_id", "ok", "reason", "fanout", "child_ids", "new_title"), _decompose_ok_line)
 
 
+from hermes_cli.kanban_administrative_hold import command as _cmd_administrative_pending
+
+from hermes_cli.kanban_wait_cli import dispatch as _cmd_wait
+
 _HANDLERS = {
+    "wait": _cmd_wait,
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
@@ -1330,12 +1410,14 @@ _HANDLERS = {
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
-    "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
+    "archive": _cmd_archive, "close": _cmd_close, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
     "daemon": _cmd_daemon, "watch": _cmd_watch, "stats": _cmd_stats,
     "log": _cmd_log, "runs": _cmd_runs, "heartbeat": _cmd_heartbeat,
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
     "context": _cmd_context, "specify": _cmd_specify, "decompose": _cmd_decompose,
+    "completion-requirements": _cmd_requirements,
+    "administrative-pending": _cmd_administrative_pending,
     "gc": _cmd_gc,
 }
 

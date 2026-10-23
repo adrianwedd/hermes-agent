@@ -16,7 +16,7 @@ import { $notifications, clearNotifications } from '@/store/notifications'
 import { bindApi, taskKey } from './api'
 import { TaskDrawer } from './drawer'
 import { en, KANBAN_LOCALES } from './i18n'
-import type { KanbanTaskDetail } from './types'
+import type { Diagnostic, KanbanTaskDetail } from './types'
 
 vi.mock('@/hermes', () => ({ setApiRequestProfile: vi.fn() }))
 
@@ -33,7 +33,7 @@ let client: QueryClient
 let disposeApi: () => void
 let disposeLocales: () => void
 
-const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<unknown> => {
+const defaultRest = async (path: string, options?: PluginRestOptions): Promise<unknown> => {
   if (path === '/tasks/t_example/attachments' && options?.method === 'POST') {
     detail = { ...legacyDetail, attachments: [{ id: 1, filename: options.upload?.filename }] }
 
@@ -61,9 +61,12 @@ const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<un
   }
 
   throw new Error(`Unexpected REST request: ${path}`)
-})
+}
+
+const rest = vi.fn(defaultRest)
 
 beforeEach(() => {
+  rest.mockImplementation(defaultRest)
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   disposeLocales = registerPluginLocales('kanban', KANBAN_LOCALES)
   disposeApi = bindApi(
@@ -432,5 +435,132 @@ describe('blocked task detail', () => {
         expect.objectContaining({ method: 'PATCH', body: { status: 'ready' } })
       )
     )
+  })
+
+  it('reports a held-card refusal without treating the gesture as a release', async () => {
+    detail = blockedDetail
+    rest.mockImplementation(async (path: string, options?: PluginRestOptions) => {
+      if (path === '/tasks/t_example' && options?.method === 'PATCH') {
+        throw new Error('Move-to-Ready refused: explicit STOP; operator release required')
+      }
+
+      return defaultRest(path, options)
+    })
+    openDrawer()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Unblock task' }))
+
+    await waitFor(() =>
+      expect(rest).toHaveBeenCalledWith(
+        '/tasks/t_example',
+        expect.objectContaining({ method: 'PATCH', body: { status: 'ready' } })
+      )
+    )
+    expect(rest).not.toHaveBeenCalledWith(
+      '/tasks/t_example',
+      expect.objectContaining({ body: expect.objectContaining({ override: true }) })
+    )
+    await waitFor(() =>
+      expect($notifications.get()[0]).toMatchObject({
+        kind: 'error',
+        message: 'Move-to-Ready refused: explicit STOP; operator release required'
+      })
+    )
+  })
+
+  it('does not report Ready after a refused dependency-held move', async () => {
+    detail = blockedDetail
+    rest.mockImplementation(async (path: string, options?: PluginRestOptions) => {
+      if (path === '/tasks/t_example' && options?.method === 'PATCH') {
+        throw new Error('Move-to-Ready refused: dependency is unsatisfied')
+      }
+
+      return defaultRest(path, options)
+    })
+    openDrawer()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Unblock task' }))
+
+    await waitFor(() =>
+      expect($notifications.get()[0]).toMatchObject({
+        kind: 'error',
+        message: 'Move-to-Ready refused: dependency is unsatisfied'
+      })
+    )
+    expect($notifications.get().some(notification => notification.kind === 'success')).toBe(false)
+  })
+
+  it('closes a blocked card through the explicit Close action, not a done PATCH', async () => {
+    detail = blockedDetail
+    openDrawer()
+
+    const actions = await screen.findByRole('button', { name: en.taskActions })
+    fireEvent.keyDown(actions, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByText(en.closeBlocked))
+
+    await waitFor(() =>
+      expect(rest).toHaveBeenCalledWith(
+        '/tasks/t_example/close',
+        expect.objectContaining({ method: 'POST' })
+      )
+    )
+    // The worker evidence gate (PATCH status=done) must NOT be the path used —
+    // it rejects a blocked card with a 400.
+    expect(rest).not.toHaveBeenCalledWith(
+      '/tasks/t_example',
+      expect.objectContaining({ body: { status: 'done' } })
+    )
+  })
+
+  it('offers no Close action on a card that is not blocked', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    openDrawer()
+
+    const actions = await screen.findByRole('button', { name: en.taskActions })
+    fireEvent.keyDown(actions, { key: 'ArrowDown' })
+
+    expect(await screen.findByText(en.archive)).toBeTruthy()
+    expect(screen.queryByText(en.closeBlocked)).toBeNull()
+  })
+})
+
+// A completed card is not a fault report. The backend withholds the diagnostics rollup
+// for terminal statuses (a block→unblock streak is frozen history once the card can no
+// longer be blocked); the drawer gates the Recovery section on the same derived fact, so
+// a cached payload that still carries the summary cannot resurrect it. The live-card arm
+// is the control: the section must survive for a card with work still to do.
+describe('a completed card is not a fault report', () => {
+  const cyclingDiag: Diagnostic = {
+    actions: [],
+    count: 3,
+    data: { cycles: 3, window_seconds: 86400 },
+    detail: 'this task bounced block → unblock',
+    kind: 'block_unblock_cycling',
+    last_seen_at: 1791248759,
+    severity: 'warning',
+    title: 'Task block→unblock cycled 3x in 24h'
+  }
+
+  it('hides the Recovery section for a done card even when the payload still carries it', async () => {
+    // Live card: the section is real, so the negative below is meaningful.
+    detail = {
+      ...legacyDetail,
+      attachments: [],
+      task: { ...legacyDetail.task, diagnostics: [cyclingDiag], status: 'ready', title: 'live' }
+    }
+    openDrawer()
+    expect(await screen.findByText(en.diagnosticsN(1))).toBeTruthy()
+    cleanup()
+
+    // The same payload, now terminal.
+    detail = {
+      ...legacyDetail,
+      attachments: [],
+      task: { ...legacyDetail.task, diagnostics: [cyclingDiag], status: 'done', title: 'finished' }
+    }
+    openDrawer()
+    await screen.findByRole('heading', { name: 'finished' })
+    expect(screen.queryByText(en.diagnosticsN(1))).toBeNull()
+    expect(screen.queryByText(cyclingDiag.title)).toBeNull()
   })
 })

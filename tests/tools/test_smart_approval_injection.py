@@ -167,16 +167,16 @@ class TestSmartApprovePromptHardening(unittest.TestCase):
         assert _smart_approve("rm -rf /", "recursive delete") == "escalate"
 
     @patch("agent.auxiliary_client.call_llm")
-    def test_empty_answer_escalates_with_warning(self, mock_call_llm):
+    def test_empty_answer_is_engine_error_with_warning(self, mock_call_llm):
         """The #117428 failure mode: a 200 response with empty content (finish_reason==
         "length" after a reasoning model spent the whole max_tokens budget on hidden
-        reasoning) must escalate AND log at WARNING — at default log levels it is otherwise
+        reasoning) must fail closed AND log at WARNING — at default log levels it is otherwise
         indistinguishable from a genuine ESCALATE verdict."""
         response = self._make_response("")
         response.choices[0].finish_reason = "length"
         mock_call_llm.return_value = response
         with self.assertLogs("tools.approval", level="WARNING") as logs:
-            assert _smart_approve("rm -rf /", "recursive delete") == "escalate"
+            assert _smart_approve("rm -rf /", "recursive delete") == "error"
         assert any("empty answer" in message and "length" in message
                    for message in logs.output), logs.output
 
@@ -188,7 +188,7 @@ class TestSmartApprovePromptHardening(unittest.TestCase):
         response.choices[0].finish_reason = None
         mock_call_llm.return_value = response
         with self.assertLogs("tools.approval", level="WARNING") as logs:
-            assert _smart_approve("rm -rf /", "recursive delete") == "escalate"
+            assert _smart_approve("rm -rf /", "recursive delete") == "error"
         assert any("finish_reason=None" in message for message in logs.output), logs.output
 
     @patch("agent.auxiliary_client.call_llm")

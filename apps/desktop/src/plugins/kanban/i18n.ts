@@ -16,12 +16,13 @@ type KanbanMessages = {
   newTaskCommand: string
   countTip: (running: number, ready: number) => string
   col: Record<
-    'archived' | 'blocked' | 'done' | 'ready' | 'review' | 'running' | 'scheduled' | 'todo' | 'triage',
+    'archived' | 'blocked' | 'done' | 'execution' | 'ready' | 'review' | 'running' | 'scheduled' | 'todo' | 'triage',
     { label: string; help: string }
   >
   locked: { review: string; running: string; scheduled: string }
   arcRunning: string
   arcStale: string
+  dispatch: { heading: string; held: string; enabled: string; unavailable: string; disabledReason: string; enabledReason: string; missingReason: string; owner: (name: string) => string; next: (action: string) => string; afterGate: (action: string) => string }
   title: string
   orchestrationSettings: string
   newTask: string
@@ -55,6 +56,9 @@ type KanbanMessages = {
   assign: string
   unassignAction: string
   archive: string
+  /** #ticket-close — explicit operator Close of a blocked card (blocked->done). */
+  closeBlocked: string
+  closedMessage: (id: string) => string
   clearSelection: string
   refused: string
   bulkFailed: (failed: number, total: number, err: string) => string
@@ -123,6 +127,10 @@ type KanbanMessages = {
   metaCreatedBy: string
   metaCreated: string
   metaWorkerPid: string
+  /** After-creation priority editing — native queue order, not decoration. */
+  priorityEdit: string
+  priorityHint: string
+  priorityInvalid: string
   /** #124391 — blocked-card detail: why it blocked and what it cost. */
   blockKindTip: (kind: string) => string
   blockReason: string
@@ -131,6 +139,8 @@ type KanbanMessages = {
   consecutiveFailures: string
   lastFailureError: string
   unblockedMessage: (id: string) => string
+  readyOverrideReached: (id: string) => string
+  readyOverrideHeld: (id: string, summary: string) => string
   readyUnassignedTitle: string
   readyUnassignedBody: string
   diagnosticsN: (n: number) => string
@@ -235,6 +245,7 @@ export const en: KanbanMessages = {
     scheduled: { label: 'Scheduled', help: 'Waiting for a scheduled time to arrive.' },
     ready: { label: 'Ready', help: 'Dependencies satisfied — assign a profile and the dispatcher runs it.' },
     running: { label: 'Running', help: 'Claimed by a worker — an agent is on it. Set by the dispatcher.' },
+    execution: { label: 'Environment', help: 'The work remains valid, but the shared execution environment must recover.' },
     blocked: { label: 'Blocked', help: 'The worker asked for human input.' },
     review: { label: 'Review', help: 'A review agent is checking the work. Set by the dispatcher.' },
     done: { label: 'Done', help: 'Completed; dependent children become ready.' },
@@ -247,6 +258,7 @@ export const en: KanbanMessages = {
   },
   arcRunning: 'An agent is working on this now.',
   arcStale: 'Claimed, but no worker heartbeat for 2+ minutes — the dispatcher will reclaim it.',
+  dispatch: { heading: 'Dispatch eligibility', held: 'Not dispatchable', enabled: 'Dispatch eligibility enabled', unavailable: 'Dispatch state unavailable', disabledReason: 'No worker action is currently dispatchable; the card state must name the actual next action', enabledReason: 'dispatch_eligible=true; other admission gates may still apply', missingReason: 'Backend did not serialize dispatch eligibility', owner: name => `Owner: ${name}`, next: action => `Next: ${action}`, afterGate: action => `After gate: ${action}` },
   title: 'Kanban',
   orchestrationSettings: 'Orchestration settings',
   newTask: 'New task',
@@ -281,6 +293,8 @@ export const en: KanbanMessages = {
   assign: 'Assign',
   unassignAction: 'Unassign',
   archive: 'Archive',
+  closeBlocked: 'Close (mark done)',
+  closedMessage: id => `Closed ${id}`,
   clearSelection: 'Clear selection (Esc)',
   refused: 'refused',
   bulkFailed: (failed, total, err) => `${failed} of ${total} failed — ${err}. Failed cards stay selected.`,
@@ -349,6 +363,9 @@ export const en: KanbanMessages = {
   metaCreatedBy: 'Created by',
   metaCreated: 'Created',
   metaWorkerPid: 'Worker pid',
+  priorityEdit: 'Change priority',
+  priorityHint: 'Change priority. Higher numbers are claimed first by the dispatcher.',
+  priorityInvalid: 'Enter a whole number (0 is the default; higher is claimed first).',
   blockKindTip: kind =>
     kind === 'needs_input'
       ? 'The worker asked for human input.'
@@ -363,6 +380,8 @@ export const en: KanbanMessages = {
   consecutiveFailures: 'Consecutive failures',
   lastFailureError: 'Last failure',
   unblockedMessage: id => `Unblocked ${id}. Task is ready for the next tick.`,
+  readyOverrideReached: id => `Released ${id}. It is ready and the dispatcher may start it now.`,
+  readyOverrideHeld: (id, summary) => `Released ${id}, but it is NOT ready: ${summary}`,
   readyUnassignedTitle: 'Ready, but unassigned — this card will never run.',
   readyUnassignedBody:
     'The dispatcher only claims Ready cards that have an assignee. Pick a profile in the Assignee field above (or set a default assignee in the orchestration settings) and it runs within a minute.',
@@ -463,6 +482,7 @@ const ja: KanbanMessages = {
     scheduled: { label: 'スケジュール', help: '予定時刻を待っています。' },
     ready: { label: 'Ready', help: '依存関係が解決済み — プロフィールを割り当てるとディスパッチャが実行します。' },
     running: { label: '実行中', help: 'ワーカーが取得済み — エージェントが作業中。ディスパッチャが設定します。' },
+    execution: { label: '実行環境', help: '作業は有効ですが、共有実行環境の復旧を待っています。' },
     blocked: { label: 'ブロック', help: 'ワーカーが人間の入力を求めています。' },
     review: { label: 'レビュー', help: 'レビューエージェントが作業を確認中。ディスパッチャが設定します。' },
     done: { label: '完了', help: '完了。依存する子タスクが Ready になります。' },
@@ -475,6 +495,7 @@ const ja: KanbanMessages = {
   },
   arcRunning: 'エージェントが現在作業中です。',
   arcStale: '取得済みですが、2分以上ワーカーのハートビートがありません — ディスパッチャが再取得します。',
+  dispatch: { heading: '実行可否', held: '保留 · 実行無効', enabled: '実行資格が有効', unavailable: '実行状態を取得できません', disabledReason: 'dispatch_eligible=false; このバックエンドには保留理由の記録がありません', enabledReason: 'dispatch_eligible=true; 他の実行条件が適用される場合があります', missingReason: 'バックエンドが実行資格を返していません', owner: name => `担当: ${name}`, next: action => `次の操作: ${action}`, afterGate: action => `条件成立後: ${action}` },
   title: 'カンバン',
   orchestrationSettings: 'オーケストレーション設定',
   newTask: '新しいタスク',
@@ -509,6 +530,8 @@ const ja: KanbanMessages = {
   assign: '割り当て',
   unassignAction: '割り当て解除',
   archive: 'アーカイブ',
+  closeBlocked: 'クローズ（完了にする）',
+  closedMessage: id => `${id} をクローズしました`,
   clearSelection: '選択をクリア（Esc）',
   refused: '拒否されました',
   bulkFailed: (failed, total, err) => `${total} 件中 ${failed} 件が失敗 — ${err}。失敗したカードは選択されたままです。`,
@@ -576,6 +599,9 @@ const ja: KanbanMessages = {
   metaCreatedBy: '作成者',
   metaCreated: '作成',
   metaWorkerPid: 'ワーカー PID',
+  priorityEdit: '優先度を変更',
+  priorityHint: '優先度を変更。数値が大きいほどディスパッチャに先に取得されます。',
+  priorityInvalid: '整数を入力してください（0 が既定、大きいほど先に取得されます）。',
   blockKindTip: kind =>
     kind === 'needs_input'
       ? 'ワーカーが人間の入力を求めています。'
@@ -590,6 +616,8 @@ const ja: KanbanMessages = {
   consecutiveFailures: '連続失敗',
   lastFailureError: '直近の失敗',
   unblockedMessage: id => `${id} をブロック解除しました。次のティックで実行できます。`,
+  readyOverrideReached: id => `${id} を解放しました。Ready になり、ディスパッチャーが今すぐ起動できます。`,
+  readyOverrideHeld: (id, summary) => `${id} を解放しましたが、Ready ではありません: ${summary}`,
   readyUnassignedTitle: 'Ready ですが未割り当て — このカードは実行されません。',
   readyUnassignedBody:
     'ディスパッチャは担当のある Ready カードのみ取得します。上の担当フィールドでプロフィールを選ぶ（またはオーケストレーション設定でデフォルトの担当を設定する）と、1分以内に実行されます。',
@@ -690,6 +718,7 @@ const zh: KanbanMessages = {
     scheduled: { label: '已排期', help: '等待预定时间到来。' },
     ready: { label: '就绪', help: '依赖已满足 — 分配一个配置档，调度器即会运行它。' },
     running: { label: '运行中', help: '已被工作单元领取 — 有代理在处理。由调度器设置。' },
+    execution: { label: '执行环境', help: '工作仍然有效，但正在等待共享执行环境恢复。' },
     blocked: { label: '受阻', help: '工作单元需要人工输入。' },
     review: { label: '审查', help: '审查代理正在检查工作。由调度器设置。' },
     done: { label: '完成', help: '已完成；依赖它的子任务变为就绪。' },
@@ -702,6 +731,7 @@ const zh: KanbanMessages = {
   },
   arcRunning: '有代理正在处理它。',
   arcStale: '已领取，但超过 2 分钟没有工作单元心跳 — 调度器将重新领取。',
+  dispatch: { heading: '调度资格', held: '保留 · 调度禁用', enabled: '调度资格已启用', unavailable: '调度状态不可用', disabledReason: 'dispatch_eligible=false; 此后端未提供明确的保留原因', enabledReason: 'dispatch_eligible=true; 其他准入条件仍可能适用', missingReason: '后端未返回调度资格', owner: name => `负责人: ${name}`, next: action => `下一步: ${action}`, afterGate: action => `条件满足后: ${action}` },
   title: '看板',
   orchestrationSettings: '编排设置',
   newTask: '新建任务',
@@ -735,6 +765,8 @@ const zh: KanbanMessages = {
   assign: '分配',
   unassignAction: '取消分配',
   archive: '归档',
+  closeBlocked: '关闭（标记为完成）',
+  closedMessage: id => `已关闭 ${id}`,
   clearSelection: '清除选择（Esc）',
   refused: '被拒绝',
   bulkFailed: (failed, total, err) => `${total} 个中有 ${failed} 个失败 — ${err}。失败的卡片仍保持选中。`,
@@ -802,6 +834,9 @@ const zh: KanbanMessages = {
   metaCreatedBy: '创建者',
   metaCreated: '创建于',
   metaWorkerPid: '工作单元 PID',
+  priorityEdit: '修改优先级',
+  priorityHint: '修改优先级。数值越大越先被调度器领取。',
+  priorityInvalid: '请输入整数（0 为默认，数值越大越先领取）。',
   blockKindTip: kind =>
     kind === 'needs_input'
       ? '工作单元正在等待人工输入。'
@@ -816,6 +851,8 @@ const zh: KanbanMessages = {
   consecutiveFailures: '连续失败',
   lastFailureError: '最近失败',
   unblockedMessage: id => `已解除 ${id} 的阻塞。任务将在下一轮调度中就绪。`,
+  readyOverrideReached: id => `已释放 ${id}。它已就绪，调度器现在可以启动它。`,
+  readyOverrideHeld: (id, summary) => `已释放 ${id}，但它并未就绪：${summary}`,
   readyUnassignedTitle: '就绪但未分配 — 这张卡片永远不会运行。',
   readyUnassignedBody:
     '调度器只领取有负责人的就绪卡片。在上面的负责人字段选择一个配置档（或在编排设置中设置默认负责人），它会在一分钟内运行。',
@@ -914,6 +951,7 @@ const zhHant: KanbanMessages = {
     scheduled: { label: '已排程', help: '等待預定時間到來。' },
     ready: { label: '就緒', help: '相依項目已滿足 — 指派一個設定檔，排程器便會執行它。' },
     running: { label: '執行中', help: '已被工作單元領取 — 有代理在處理。由排程器設定。' },
+    execution: { label: '執行環境', help: '工作仍然有效，但正在等待共享執行環境恢復。' },
     blocked: { label: '受阻', help: '工作單元需要人工輸入。' },
     review: { label: '審查', help: '審查代理正在檢查工作。由排程器設定。' },
     done: { label: '完成', help: '已完成；相依它的子任務變為就緒。' },
@@ -926,6 +964,7 @@ const zhHant: KanbanMessages = {
   },
   arcRunning: '有代理正在處理它。',
   arcStale: '已領取，但超過 2 分鐘沒有工作單元心跳 — 排程器將重新領取。',
+  dispatch: { heading: '排程資格', held: '保留 · 排程停用', enabled: '排程資格已啟用', unavailable: '排程狀態無法取得', disabledReason: 'dispatch_eligible=false; 此後端未提供明確的保留原因', enabledReason: 'dispatch_eligible=true; 其他准入條件仍可能適用', missingReason: '後端未傳回排程資格', owner: name => `負責人: ${name}`, next: action => `下一步: ${action}`, afterGate: action => `條件滿足後: ${action}` },
   title: '看板',
   orchestrationSettings: '編排設定',
   newTask: '新增任務',
@@ -959,6 +998,8 @@ const zhHant: KanbanMessages = {
   assign: '指派',
   unassignAction: '取消指派',
   archive: '封存',
+  closeBlocked: '關閉（標記為完成）',
+  closedMessage: id => `已關閉 ${id}`,
   clearSelection: '清除選取（Esc）',
   refused: '被拒絕',
   bulkFailed: (failed, total, err) => `${total} 個中有 ${failed} 個失敗 — ${err}。失敗的卡片仍保持選取。`,
@@ -1026,6 +1067,9 @@ const zhHant: KanbanMessages = {
   metaCreatedBy: '建立者',
   metaCreated: '建立於',
   metaWorkerPid: '工作單元 PID',
+  priorityEdit: '修改優先順序',
+  priorityHint: '修改優先順序。數值越大越先被調度器領取。',
+  priorityInvalid: '請輸入整數（0 為預設，數值越大越先領取）。',
   blockKindTip: kind =>
     kind === 'needs_input'
       ? '工作單元正在等待人工輸入。'
@@ -1040,6 +1084,8 @@ const zhHant: KanbanMessages = {
   consecutiveFailures: '連續失敗',
   lastFailureError: '最近失敗',
   unblockedMessage: id => `已解除 ${id} 的封鎖。任務將在下一輪排程中就緒。`,
+  readyOverrideReached: id => `已釋放 ${id}。它已就緒，調度器現在可以啟動它。`,
+  readyOverrideHeld: (id, summary) => `已釋放 ${id}，但它並未就緒：${summary}`,
   readyUnassignedTitle: '就緒但未指派 — 這張卡片永遠不會執行。',
   readyUnassignedBody:
     '排程器只領取有負責人的就緒卡片。在上方的負責人欄位選擇一個設定檔（或在編排設定中設定預設負責人），它會在一分鐘內執行。',

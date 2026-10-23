@@ -24,6 +24,7 @@ from hermes_state_common import (
     _source_match_clause, emit_session_deleted, launch_stub_filter_sql,
 )
 from hermes_state_compression import _CHAIN_CAP, _UNSET_CREATED_SQL
+from hermes_state_kanban_scope import kanban_scope_sql
 
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
@@ -1166,6 +1167,7 @@ class SessionSessionsMixin:
         timeout_seconds: float = 3.0,
         candidate_limit: int | None = None,
         lineage_limit: int | None = None,
+        kanban_scope: tuple[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Latency-bounded recent-conversation browse (``session_search()``): preselect a small candidate set
         from the indexed durable activity timestamp (fallback ``started_at``), resolve only those across
@@ -1194,6 +1196,9 @@ class SessionSessionsMixin:
             placeholders = ",".join("?" for _ in exclude_sources)
             candidate_clauses.append(f"s.source NOT IN ({placeholders})")
             candidate_params.extend(exclude_sources)
+        if kanban_scope is not None:
+            candidate_clauses.append(kanban_scope_sql("s"))
+            candidate_params.extend(kanban_scope)
         candidate_where = " AND ".join(candidate_clauses)
 
         # A compression continuation is an implementation edge, unlike /new

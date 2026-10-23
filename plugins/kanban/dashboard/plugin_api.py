@@ -172,8 +172,14 @@ def _errors_to_500(prefix: str) -> Iterator[None]:
 # --- Serialization helpers --------------------------------------------------
 
 # Dashboard columns, left-to-right ("archived" is a filter toggle, not a column), from the
-# one workflow definition. A status missing here gets mis-bucketed into ``todo``.
-BOARD_COLUMNS: list[str] = list(kanban_workflow.DEFAULT_WORKFLOW.keys())
+# one workflow definition plus the derived lanes a refused card is bucketed into (see the
+# DERIVED-stage bucketing below). A status missing here gets mis-bucketed into ``todo``.
+_WORKFLOW_COLUMNS = list(kanban_workflow.DEFAULT_WORKFLOW.keys())
+_AFTER_RUNNING = _WORKFLOW_COLUMNS.index("running") + 1
+BOARD_COLUMNS: list[str] = [
+    *_WORKFLOW_COLUMNS[:_AFTER_RUNNING], "execution", "workflow", "held", "operator",
+    *_WORKFLOW_COLUMNS[_AFTER_RUNNING:],
+]
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
 
@@ -322,16 +328,32 @@ def get_board(
         summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
         # One query for the active run's start per card (avoids N+1); the run
         # clock ticks from this, not the task's first-ever start.
+        from hermes_cli.kanban_native_estimates import read_saved
         run_start_map = kanban_db.current_run_started_ats(conn, [t.id for t in tasks])
+        from hermes_cli.kanban_card_facts import card_facts, native_config_for, token_facts, native_read_session
+        from hermes_cli.kanban_run_routes import run_routes
+        from hermes_cli.moa_config import resolve_moa_preset
+        facts = card_facts(conn, [asdict(t) for t in tasks], native_config_for, resolve_moa_preset)
         for t in tasks:
             full = summary_map.get(t.id)
             d = _task_dict(t, latest_summary=(full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None),
                            current_run_started_at=run_start_map.get(t.id))
+            d["task_estimate"] = read_saved(conn, t.id, t.title, t.body)
+            d["card_facts"] = facts.get(t.id)
+            d["card_facts"]["tokens"] = token_facts(conn, asdict(t), native_read_session)
+            d["card_facts"]["run_routes"] = run_routes(conn, asdict(t), native_read_session)
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
-            d["progress"] = progress.get(t.id)  # None when the task has no children
+            # A terminal card's child rollup is history: "3/5 done" under a finished
+            # card reads as unfinished work still in flight. Withhold it so the UI
+            # cannot show stale progress on completed cards.
+            d["progress"] = None if t.status in ("done", "archived") else progress.get(t.id)
             _attach_diagnostics(d, diagnostics_per_task.get(t.id))
-            columns[t.status if t.status in columns else "todo"].append(d)
+            # Bucket by the DERIVED stage, not the raw status: a card the dispatcher
+            # refuses (operator hold, unqualified scope, unresolved gate) must not sit
+            # in Ready or Review under a tile that contradicts its own card_facts.
+            column = d["card_facts"]["dispatch"]["column"]
+            columns[column if column in columns else "todo"].append(d)
 
         # Queue lanes keep the list_tasks dispatch order; the done column is
         # history, so order it newest-completed-first. Two stable sorts compose
@@ -392,6 +414,14 @@ def get_task(
         task_d = _task_dict(
             task, latest_summary=kanban_db.latest_summary(conn, task_id),
             current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id))
+        from hermes_cli.kanban_card_facts import card_facts, native_config_for, token_facts, native_read_session
+        from hermes_cli.kanban_run_routes import run_routes
+        from hermes_cli.moa_config import resolve_moa_preset
+        from hermes_cli.kanban_native_estimates import read_saved
+        task_d['task_estimate'] = read_saved(conn, task_id, task.title, task.body)
+        task_d['card_facts'] = card_facts(conn, [asdict(task)], native_config_for, resolve_moa_preset)[task_id]
+        task_d['card_facts']['tokens'] = token_facts(conn, asdict(task), native_read_session)
+        task_d['card_facts']['run_routes'] = run_routes(conn, asdict(task), native_read_session)
         links = _links_for(conn, task_id)
         child_summaries = kanban_db.latest_summaries(conn, links["children"])
         children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))
@@ -531,6 +561,7 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 # --- PATCH /tasks/:id  and  POST /tasks/bulk ---------------------------------
 
 class UpdateTaskBody(BaseModel):
+    dispatch_eligible: Optional[bool] = Field(None, strict=True)
     status: Optional[str] = None
     assignee: Optional[str] = None
     priority: Optional[int] = None
@@ -538,6 +569,10 @@ class UpdateTaskBody(BaseModel):
     body: Optional[str] = None
     result: Optional[str] = None
     block_reason: Optional[str] = None
+    # Legacy compatibility for explicit Ready override. It requires a reason
+    # but cannot revoke a hold; the hold's own transition owns that action.
+    override: bool = False
+    override_reason: Optional[str] = None
     # Handoff fields forwarded to complete_task on -> 'done' (parity with ``hermes kanban complete``).
     summary: Optional[str] = None
     metadata: Optional[dict] = None
@@ -552,6 +587,7 @@ class UpdateTaskBody(BaseModel):
 
 
 class BulkTaskBody(BaseModel):
+    dispatch_eligible: Optional[bool] = None
     ids: list[str]
     status: Optional[str] = None
     assignee: Optional[str] = None  # "" or None = unassign
@@ -561,7 +597,9 @@ class BulkTaskBody(BaseModel):
     summary: Optional[str] = None
     metadata: Optional[dict] = None
     reclaim_first: bool = False
-    # Same semantics as UpdateTaskBody.
+    # Same semantics as UpdateTaskBody (see ``override`` there).
+    override: bool = False
+    override_reason: Optional[str] = None
     model_override: Optional[str] = None
     provider_override: Optional[str] = None
     clear_model_override: bool = False
@@ -577,14 +615,16 @@ _RUNNING_DIRECT_MSG = "Cannot set status to 'running' directly; use the dispatch
 
 
 def _drag_to(conn, task_id: str, s: str) -> bool:
-    """Drag-drop into ready/todo/triage: blocked/scheduled -> ready re-opens via ``unblock_task``;
-    leaving ``review`` goes through ``reopen_review_task`` (stale-run recovery, parent re-gate,
-    ``review_reopened`` event) instead of a raw write; ``triage`` needs no current-state query."""
-    current = kanban_db.get_task(conn, task_id) if s != "triage" else None
+    """Ordinary lane edits; review, accepted work and STOP need distinct transitions."""
+    current = kanban_db.get_task(conn, task_id)
+    if current and current.status == "review":
+        raise _conflict("review cannot be reopened by a status edit; use the review decision path")
+    if current and current.status in {"done", "archived"}:
+        raise _conflict("accepted work cannot be reopened by a status edit")
+    if current and current.block_kind == "explicit_stop":
+        raise _conflict("explicit STOP cannot be changed by a status edit")
     if s == "ready" and current and current.status in ("blocked", "scheduled"):
         return kanban_db.unblock_task(conn, task_id)
-    if current is not None and current.status == "review":
-        return kanban_db.reopen_review_task(conn, task_id)
     return _set_status_direct(conn, task_id, s)
 
 
@@ -605,13 +645,27 @@ _STATUS_HANDLERS: dict[str, Any] = {
 
 def _apply_status(conn, task_id: str, s: str, p, unknown_detail: str) -> bool:
     """Dispatch a status verb; raises ``_StatusRejected`` (user-facing message)
-    for ``running`` or an unknown status (``unknown_detail``)."""
+    for ``running`` or an unknown status (``unknown_detail``). A claim that lands
+    mid-write fails closed as a ``_conflict`` from here, so every caller (PATCH and
+    bulk) reports a real refusal instead of a false success."""
     if s == "running":
         raise _StatusRejected(_RUNNING_DIRECT_MSG)
     handler = _STATUS_HANDLERS.get(s)
     if handler is None:
         raise _StatusRejected(unknown_detail)
-    return handler(conn, task_id, p)
+    try:
+        return handler(conn, task_id, p)
+    except _ClaimArrived:
+        # A claim owns the card the caller did not route through the release: it was
+        # already live at the preflight, or it arrived mid-write. Nothing was written and
+        # no process was signalled -- fail closed. A just-arrived claim is what the Ready
+        # gesture wanted anyway (the card runs), and terminating a dispatcher acting in
+        # that instant is NOT delegated to a stale write: only a release that OBSERVED the
+        # claim at routing time (an explicit override in ``_patch_status``) owns the
+        # terminate-first reclaim, and a surviving worker is always refused, never cleared.
+        if s != "ready":
+            raise _conflict(f"status transition to {s!r} refused: a worker claims this card")
+        raise _conflict("a worker claims this card mid-request; the claim runs instead of the stale Ready write")
 
 
 def _set_priority(conn, task_id: str, priority: int, board: Optional[str]) -> None:
@@ -635,10 +689,38 @@ _OVERRIDE_OPS = (
 )
 
 
-def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_deferred: bool) -> None:
+def _held_ready_refusal(conn, task_id: str, surface: str) -> None:
+    """A plain Ready gesture cannot supply authority to retire an existing hold.
+
+    A held card needs its specific evidence-bearing transition.
+    """
+    required = _release_required(conn, task_id)
+    raise _conflict(
+        f"Move-to-Ready via {surface} refused: {required or 'current hold changed'}. "
+        "A plain status gesture does not revoke STOPs, waive dependencies, "
+        "reopen completed work, or terminate a worker. Use the specific "
+        "authorised transition for the hold."
+    )
+
+
+def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_deferred: bool) -> Optional[dict]:
     """PATCH status phase: 400 on a rejected verb, 409 when the transition is refused
-    (naming the blocking parent(s) for ``ready``/``done``/``review`` so the UI renders an actionable toast)."""
+    (naming the blocking parent(s) for ``ready``/``done``/``review`` so the UI renders an
+    actionable toast).
+
+    A plain ``{"status": "ready"}`` on a held card refuses with the exact hold.
+    Removing a UI form does not turn that gesture into an operator release.
+    ``override: true`` is a compatibility route that cannot waive a hold.
+    """
     s = payload.status
+    if s == "ready" and getattr(payload, "override", False):
+        return _operator_ready_release(conn, task_id, payload)
+    if s == "ready":
+        # A held card needs a separate operator decision; the ordinary gesture
+        # must not erase a STOP, dependency, live claim or prior completion.
+        required = _release_required(conn, task_id)
+        if required:
+            _held_ready_refusal(conn, task_id, "single PATCH")
     if s == "archived":
         ok = kanban_db.archive_task(conn, task_id)
     else:
@@ -647,7 +729,7 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
         if s == "review" and ok and review_assignee_deferred and not payload.assignee:
             ok = kanban_db.assign_task(conn, task_id, None)
     if ok:
-        return
+        return None
     blockers = _parents_blocking_ready(conn, task_id) if s == "ready" else []
     if blockers:
         names = ", ".join(f"{p['title']!r} ({p['id']}, status={p['status']})" for p in blockers)
@@ -693,14 +775,35 @@ def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Option
 def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None)):
     with _board_conn(board) as (board, conn):
         _require_task(conn, task_id)
+        if payload.dispatch_eligible is not None:
+            raise HTTPException(status_code=400, detail=(
+                "dispatch eligibility is not a task edit; use the explicit operator release "
+                "to restore a held card"
+            ))
+        if payload.status == "ready" and payload.override:
+            if not (payload.override_reason or "").strip():
+                raise HTTPException(status_code=400, detail="an operator Ready override requires a reason (override_reason)")
+            if payload.model_fields_set - {"status", "override", "override_reason"}:
+                raise HTTPException(status_code=400, detail="operator Ready release must be sent without companion edits")
+        # Reject a held plain-Ready request before applying any companion edits.
+        if payload.status == "ready" and not payload.override and _release_required(conn, task_id):
+            _held_ready_refusal(conn, task_id, "single PATCH")
+        if payload.status in {"ready", "todo", "triage"}:
+            current = kanban_db.get_task(conn, task_id)
+            if current.status in {"done", "archived", "review"} or current.block_kind == "explicit_stop":
+                raise _conflict("accepted, review or STOP work cannot be reopened by a status edit")
         # For a combined assignee+review patch, request_review must capture the
         # current implementer before the task is routed to the reviewer.
         review_assignee_deferred = payload.status == "review" and payload.assignee is not None
         if payload.assignee is not None and not review_assignee_deferred:
             with _map_errors(409, RuntimeError):
                 _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
+        release: Optional[dict] = None
+        auto_release = False
         if payload.status is not None:
-            _patch_status(conn, task_id, payload, review_assignee_deferred)
+            release = _patch_status(conn, task_id, payload, review_assignee_deferred)
+            # Kept for response compatibility; only explicit override can now release.
+            auto_release = bool(release) and payload.status == "ready" and not payload.override
         for wanted, apply, _refused in _OVERRIDE_OPS:
             if wanted(payload):
                 with _map_errors(400, ValueError, RuntimeError):
@@ -711,9 +814,33 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if payload.title is not None or payload.body is not None:
             _patch_title_body(conn, task_id, payload, board)
         updated = kanban_db.get_task(conn, task_id)
-        return {"task": _task_dict(
+        response: dict[str, Any] = {"task": _task_dict(
             updated, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)
         ) if updated else None}
+        if release is not None:
+            # The release's canonical outcome, not the requested status: a caller that
+            # asked for Ready must be able to see the card that did NOT get there.
+            response["release"] = release
+            response["auto_release"] = auto_release
+        return response
+
+
+class ProjectBindingBody(BaseModel):
+    project_id: str
+    expected_status: str
+    expected_assignee: Optional[str]
+    expected_workspace_path: Optional[str]
+    expected_project_id: Optional[str]
+
+
+@router.post("/tasks/{task_id}/project")
+def bind_existing_task_project(task_id: str, payload: ProjectBindingBody, board: Optional[str] = Query(None)):
+    from hermes_cli.kanban_project_binding import bind_project
+    with _board_conn(board) as (board, conn):
+        _require_task(conn, task_id)
+        with _map_errors(409, RuntimeError), _map_errors(400, ValueError):
+            _require_ok(bind_project(conn, task_id, board=board, **payload.model_dump()))
+        return {"task": _task_dict(_require_task(conn, task_id))}
 
 
 @router.delete("/tasks/{task_id}")
@@ -722,6 +849,50 @@ def delete_task(task_id: str, board: Optional[str] = Query(None)):
         if not kanban_db.delete_task(conn, task_id):
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
         return {"deleted": True, "task_id": task_id}
+
+
+class CloseTaskBody(BaseModel):
+    """Explicit operator Close for a blocked card (see ``kanban_db.close_task``)."""
+
+    resolution: Optional[str] = None
+
+
+_OPERATOR_CLOSE_DEFAULT = "Closed by operator without a completion manifest."
+
+
+@router.post("/tasks/{task_id}/close")
+def close_blocked_task(task_id: str, payload: CloseTaskBody, board: Optional[str] = Query(None)):
+    """``blocked`` -> ``done`` as an explicit operator Close (#ticket-close).
+
+    The board's other completion door (``PATCH {"status": "done"}``) runs the
+    worker evidence gate: it demands ``completion-evidence.json`` plus an
+    accepted command run, and a ``blocked`` card cannot even reach REVIEW to be
+    approved. That gate is load-bearing for workers and is left exactly as it
+    is; this route is the separate, explicitly-named operator override of the
+    ceremony, and it still honours a live worker claim, unsatisfied parents and
+    a PR/issue acceptance contract (409).
+    """
+    with _board_conn(board) as (board, conn):
+        _require_task(conn, task_id)
+        try:
+            ok = kanban_db.close_task(
+                conn, task_id, summary=(payload.resolution or "").strip() or _OPERATOR_CLOSE_DEFAULT)
+        except kanban_db.LiveClaimError as exc:
+            raise _conflict(str(exc))
+        except kanban_db.OperatorCloseRefused as exc:
+            raise _conflict(exc.reason)
+        if not ok:
+            current = kanban_db.get_task(conn, task_id)
+            if current is None:
+                raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+            raise _conflict(
+                f"cannot close {task_id}: only a blocked card can be closed (status={current.status!r}); "
+                "satisfy its dependencies first"
+            )
+        updated = kanban_db.get_task(conn, task_id)
+        return {"task": _task_dict(
+            updated, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)
+        ) if updated else None}
 
 
 def _parents_blocking_ready(conn: sqlite3.Connection, task_id: str) -> list:
@@ -739,18 +910,80 @@ def _parents_blocking_ready(conn: sqlite3.Connection, task_id: str) -> list:
     return [{"id": r["id"], "title": r["title"], "status": r["status"]} for r in rows]
 
 
+class _ClaimArrived(Exception):
+    """Raised by :func:`_set_status_direct` when a claim owns the card that the caller did
+    not own, including a claim arriving between preflight and write. The direct
+    status edit fails closed and never clears the worker's claim."""
+
+    def __init__(self, prev, *, midflight: bool):
+        self.prev = prev
+        self.midflight = midflight
+        super().__init__("a claim owns this card")
+
+
+def _worker_owns(prev) -> bool:
+    """True when the snapshot ``prev`` carries any worker ownership at all."""
+    return bool(prev["current_run_id"] or prev["worker_pid"] or prev["claim_lock"])
+
+
+def _ownership_unchanged(snapshot, prev) -> bool:
+    """True when the row under the lock is the SAME ownership the caller preflight-checked.
+
+    The coordination primitive the round-5 review asks for: compare the snapshot whose
+    (absent) ownership the caller saw against the row now under the write lock. Any new
+    claim/run/pid is a different owner, so the direct write must NOT act on it.
+    """
+    if snapshot is None:
+        return not (prev["current_run_id"] or prev["worker_pid"] or prev["claim_lock"])
+    return (
+        prev["current_run_id"] == snapshot["current_run_id"]
+        and prev["worker_pid"] == snapshot["worker_pid"]
+        and prev["claim_lock"] == snapshot["claim_lock"]
+        and prev["status"] == snapshot["status"]
+    )
+
+
 def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) -> bool:
     """Direct status write for drag-drop moves without a structured verb (todo<->ready,
     running<->ready) + a ``status`` event. Leaving ``running`` closes the run as 'reclaimed'
-    so attempt history isn't orphaned; the worker is killed only AFTER the txn commits."""
+    so attempt history isn't orphaned.
+
+    Race-safe ownership, in the order the round-5 review requires (no process signal under
+    the write lock):
+
+    1. Preflight: snapshot the row and refuse any live claim.
+    2. Under the write lock, re-read the row and CAS the snapshot: if the ownership changed
+       since the preflight (a claim arrived between the routing check and this write),
+       abort with :class:`_ClaimArrived`. The new owner and run stay untouched.
+    3. Only a still-claim-free row is written. Its terminations (a drag running->todo) are
+       already dead by construction, because step 1 refuses any path with a live claim.
+    """
+    snapshot = None
+    if new_status != "running":
+        snapshot = conn.execute(
+            "SELECT status, block_kind, current_run_id, worker_pid, claim_lock, worker_started_at FROM tasks WHERE id = ?",
+            (task_id,)).fetchone()
+        if snapshot is not None and _worker_owns(snapshot):
+            # Whatever the caller thought, a live claim owns this card now. This path is the
+            # plain write, not the audited release: it refuses so the caller re-routes.
+            raise _ClaimArrived(snapshot, midflight=False)
     terminations: list[tuple[Optional[int], Optional[str], Optional[int]]] = []
     effective_status = new_status
     with kanban_db.write_txn(conn):
         prev = conn.execute(
-            "SELECT status, current_run_id, worker_pid, claim_lock, worker_started_at FROM tasks WHERE id = ?",
+            "SELECT status, block_kind, current_run_id, worker_pid, claim_lock, worker_started_at FROM tasks WHERE id = ?",
             (task_id,)).fetchone()
         if prev is None:
             return False
+        if not _ownership_unchanged(snapshot, prev):
+            # The claim arrived in the window between the preflight and this write. Do not
+            # touch the new owner's run/claim: unwind before any write and let the caller
+            # report the SAME release-required signal. Nothing is signalled under the lock.
+            raise _ClaimArrived(prev, midflight=True)
+        if prev["status"] in {"done", "archived", "review"} and new_status not in {prev["status"]}:
+            raise _conflict("accepted or review work cannot be reopened by a status edit")
+        if prev["block_kind"] == "explicit_stop":
+            raise _conflict("explicit STOP cannot be changed by a status edit")
         if prev["status"] == "running" and new_status == "ready":
             resume_status = kanban_db._retry_status_for_run(conn, task_id, prev["current_run_id"])
             if resume_status == "review":
@@ -760,7 +993,6 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
         if effective_status == "ready" and not kanban_db._parents_satisfied(conn, task_id):
             return False
         was_running = prev["status"] == "running"
-        reopening_satisfied_parent = prev["status"] in {"done", "archived"} and effective_status not in {"done", "archived"}
         cur = conn.execute(
             "UPDATE tasks SET status = ?, "
             "  claim_lock = CASE WHEN ? = 'running' THEN claim_lock ELSE NULL END, "
@@ -779,11 +1011,9 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
         conn.execute(
             "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'status', ?, ?)",
             (task_id, run_id, json.dumps({"status": effective_status, "requested_status": new_status}), int(time.time())))
-        if reopening_satisfied_parent:
-            # Domain-layer invalidation composes via a savepoint inside our txn and hands
-            # back worker terminations to perform post-commit.
-            result = kanban_db.invalidate_descendants_for_parent_reopen(conn, task_id, author="dashboard")
-            terminations.extend(result["terminations"])
+    # Terminations only ever collected here describe workers that were already dead: the
+    # preflight above refuses any path with a live claim, so a drag running->todo terminates
+    # nothing new. Post-commit, outside the lock, as required.
     for pid, claim_lock, started_at in terminations:
         kanban_db._terminate_reclaimed_worker(pid, claim_lock, started_at=started_at)
     # Re-opening something may have made children stale.
@@ -827,6 +1057,31 @@ def delete_link(parent_id: str = Query(...), child_id: str = Query(...), board: 
         return {"ok": bool(kanban_db.unlink_tasks(conn, parent_id, child_id))}
 
 
+def _release_required(conn, task_id: str) -> Optional[str]:
+    """Why this task's plain Ready gesture needs the audited release, or ``None``."""
+    from hermes_cli.kanban_dispatch_release import requires_operator_release
+
+    return requires_operator_release(conn, task_id)
+
+
+def _operator_ready_release(conn, task_id: str, payload) -> dict:
+    """Compatibility route shared with CLI --force; held work fails closed."""
+    from hermes_cli.kanban_dispatch_release import release
+
+    reason = (getattr(payload, "override_reason", None) or "").strip()
+    if not reason:
+        raise HTTPException(
+            status_code=400,
+            detail="an operator Ready override requires a reason (override_reason)",
+        )
+    try:
+        return release(conn, task_id, reason=f"dashboard Ready override: {reason}")
+    except PermissionError as exc:
+        raise _conflict(str(exc))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str], entry: dict) -> None:
     """Apply the bulk patch to one task, recording refusals in ``entry`` without aborting the
     remaining ops — except a rejected status verb (``_StatusRejected`` propagates)."""
@@ -834,7 +1089,17 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
         entry.update(ok=False, error="archive refused")
     if payload.status is not None and not payload.archive:
         s = payload.status
-        if not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):
+        if getattr(payload, "override", False) and s == "ready":
+            # Legacy compatibility route; held work is refused by release().
+            entry["release"] = _operator_ready_release(conn, tid, payload)
+        elif s == "ready":
+            # Match single PATCH: a held card cannot acquire release authority
+            # from an ordinary bulk status gesture.
+            if _release_required(conn, tid):
+                _held_ready_refusal(conn, tid, "bulk Move-to-Ready")
+            elif not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):
+                entry.update(ok=False, error=_open_parent_refusal(conn, tid, s) or f"transition to {s!r} refused")
+        elif not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):
             entry.update(ok=False, error=_open_parent_refusal(conn, tid, s) or f"transition to {s!r} refused")
     if payload.assignee is not None:
         try:
@@ -862,6 +1127,16 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
     ids = [i for i in (payload.ids or []) if i]
     if not ids:
         raise HTTPException(status_code=400, detail="ids is required")
+    if payload.dispatch_eligible is not None:
+        raise HTTPException(status_code=400, detail=(
+            "dispatch eligibility is not a bulk task edit; use explicit operator release "
+            "to restore a held card"
+        ))
+    if payload.status == "ready" and payload.override:
+        if not (payload.override_reason or "").strip():
+            raise HTTPException(status_code=400, detail="an operator Ready override requires a reason (override_reason)")
+        if payload.model_fields_set - {"ids", "status", "override", "override_reason"}:
+            raise HTTPException(status_code=400, detail="operator Ready release must be sent without companion edits")
     results: list[dict] = []
     with _board_conn(board) as (board, conn):
         for tid in ids:
@@ -1077,9 +1352,19 @@ def estimate_text_endpoint(payload: EstimateBody):
 @router.post("/tasks/{task_id}/estimate")
 def estimate_task_endpoint(task_id: str, board: Optional[str] = Query(None)):
     """Estimate for an existing task; ``{ok, est_tokens, complexity, rationale, model}``."""
+    from hermes_cli.kanban_native_estimates import scope_hash, persist
     with _board_conn(board) as (board, conn):
         task = _require_task(conn, task_id)
-    return _run_estimate(task.title, task.body, task_id=task_id)
+        expected = scope_hash(task.title, task.body)
+    response = _run_estimate(task.title, task.body, task_id=task_id)
+    if not response.get('ok'):
+        return response  # Preserve the last durable result on timeout/failure.
+    try:
+        with _board_conn(board) as (board, conn):
+            return persist(conn, task_id, response, expected_scope=expected, board=board)
+    except Exception:
+        log.exception('Kanban native estimate persistence failed')
+        return {'ok': False, 'reason': 'estimate could not be saved; previous estimate retained'}
 
 
 def _cap(s: Optional[str], n: int) -> str:
@@ -1126,10 +1411,9 @@ def _run_estimate(title: str, body: Optional[str], *, task_id: Optional[str]) ->
         parsed = None
     if not parsed:
         return {"ok": False, "reason": "could not parse an estimate from the model"}
-    try:
-        est_tokens = int(parsed.get("est_tokens") or 0)
-    except (TypeError, ValueError):
-        est_tokens = 0
+    est_tokens = parsed.get("est_tokens")
+    if type(est_tokens) is not int or not 0 < est_tokens <= 1_000_000_000:
+        return {"ok": False, "reason": "model returned an invalid token estimate"}
     complexity = str(parsed.get("complexity") or "").strip().upper()
     return {
         "ok": True, "est_tokens": est_tokens, "complexity": complexity if complexity in {"S", "M", "L"} else None,
@@ -1380,13 +1664,21 @@ def _board_counts(slug: str) -> dict[str, int]:
 
 def _default_workspace_kind(board: dict[str, Any]) -> str:
     """Recommend a non-destructive task workspace from board metadata."""
+    from hermes_cli.kanban_persistent_workspace import persistent_root
+    root = persistent_root()
+    if root is not None:
+        project_id = board.get("project_id")
+        if project_id:
+            _pid, _name, primary_path = _resolve_project(str(project_id))
+            if primary_path:
+                board["default_workdir"] = primary_path
+        else:
+            board["default_workdir"] = str(root)
+        return "dir"
     workdir = str(board.get("default_workdir") or "").strip()
     if not workdir:
         return "scratch"
-    try:
-        return "worktree" if kbw._git_toplevel(Path(workdir)) else "dir"
-    except (OSError, ValueError):
-        return "dir"
+    return "dir"
 
 
 def _annotate_board_meta(meta: dict) -> dict:
@@ -1845,3 +2137,14 @@ async def stream_events(ws: WebSocket):
             pass
     finally:
         await tail.shutdown()
+
+
+@router.get("/worker-session-link")
+def worker_session_link(session_id: str = Query(...)):
+    from hermes_cli.kanban_worker_session_links import find_link
+    links = []
+    for info in kanban_db.list_boards(include_archived=False):
+        board = info.get('slug') or 'default'
+        with _board_conn(board) as (_, conn):
+            links.extend(find_link(conn, session_id, board))
+    return {'link': links[0] if len(links) == 1 else None, 'ambiguous': len(links) > 1}

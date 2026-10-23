@@ -1,3 +1,7 @@
+import { hermesApi } from '@/hermes'
+import { $workerCardRequest } from './kanban-card-navigation'
+import { CardFacts } from './card-facts'
+import { cardIsTerminal } from './dispatch-facts'
 /**
  * The Kanban board page — mounted at `/kanban` (a ROUTES_AREA contribution) in
  * the workspace pane or a split route tile. The desktop port of the dashboard
@@ -85,7 +89,53 @@ import { BoardSwitcher } from './board-switcher'
 import { TaskDrawer } from './drawer'
 import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
 import { OrchestrationPanel } from './orchestration'
+
+function useWorkerCardNavigation(setOpenId: (id: string | null) => void) {
+  const workerCard = useValue($workerCardRequest)
+  useEffect(() => {
+    if (!workerCard) return
+    $boardSlug.set(workerCard.board)
+    setOpenId(workerCard.card_id)
+    $workerCardRequest.set(null)
+  }, [workerCard, setOpenId])
+}
+
+function BackendReloadBanner({ archived, board }: { archived: boolean; board?: KanbanBoard }) {
+  const [reloading, setReloading] = useState(false)
+  const qc = useQueryClient()
+  const scope = useKanbanScope()
+  const slug = useValue($boardSlug)
+  const missingFacts = board?.columns.some(column => column.tasks.some(task => !task.card_facts))
+  const running = board?.columns.some(column => column.tasks.some(task => task.status === 'running'))
+  if (!missingFacts) return null
+  const reload = async () => {
+    if (!window.hermesDesktop?.recycleBackend) return
+    setReloading(true)
+    try {
+      const read = <T,>(path: string) => hermesApi<T>({ path, method: 'GET', connectionId: 'local', profile: null, passive: true })
+      const allBoards = await read<{ boards: { slug: string }[] }>('/api/plugins/kanban/boards')
+      if (!Array.isArray(allBoards.boards) || allBoards.boards.length === 0) throw new Error('Cannot verify all boards.')
+      const workers = await Promise.all(allBoards.boards.map(item => read<{ count: number }>(`/api/plugins/kanban/workers/active?board=${encodeURIComponent(item.slug)}`)))
+      if (workers.some(item => item.count !== 0)) throw new Error('Running workers remain on a board, or activity is unavailable.')
+      const idle = await read<{ idle: boolean | null }>('/api/health/idle')
+      if (idle.idle !== true) throw new Error('The primary backend cannot prove it is idle.')
+      if (!window.confirm('Load the Studio backend update in the approved idle window? This restarts the local model host.')) return
+      await window.hermesDesktop.recycleBackend(null)
+      await qc.invalidateQueries({ queryKey: boardKey(scope, slug, archived) })
+    } catch (error) {
+      host.notify({ kind: 'error', message: String(error) })
+    } finally {
+      setReloading(false)
+    }
+  }
+  return <div className="mx-4 mb-2 flex min-w-0 flex-wrap items-center gap-3 rounded border border-(--ui-stroke-tertiary) px-3 py-2 text-xs text-(--ui-text-tertiary)">
+    <span>Backend update pending. Loading it restarts the Studio local model host.</span>
+    <Button disabled={reloading || scope !== 'local' || running} size="xs" variant="outline" onClick={reload}>{reloading ? 'Checking idle state…' : 'Load backend update'}</Button>
+    <span>Requires an approved idle window; checks every board and the primary backend before restart.</span>
+  </div>
+}
 import { columnMeta, type KanbanBoard, type KanbanTask, type TaskEstimate } from './types'
+import { notifyBulkReadyRelease, notifyReadyRelease } from './ready-release'
 import {
   $newTaskLane,
   ago,
@@ -155,6 +205,10 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
   const links = task.link_counts ? task.link_counts.parents + task.link_counts.children : 0
   const fallback = useDefaultAssignee()
   const orchestrator = useOrchestration()?.resolved_orchestrator_profile ?? ''
+  // A finished card has a resolution, not a live distress signal: the backend withholds
+  // the diagnostics rollup for terminal statuses, and the badge is skipped here too so a
+  // cached payload cannot re-introduce a red fault badge on completed work.
+  const terminal = cardIsTerminal(task)
   // Ready + no assignee: with a configured default assignee the dispatcher
   // auto-assigns on its next tick (#27145) — say THAT, not "won't run". Only
   // a board with no fallback has the genuine silent failure.
@@ -167,7 +221,7 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
   const meta = columnMeta(task.status)
 
   return (
-    <div className="flex items-center gap-2 whitespace-nowrap text-[0.625rem] text-(--ui-text-tertiary)">
+    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[0.625rem] text-(--ui-text-tertiary)">
       {arc === 'queued' && attached ? (
         // WHO is coming for the card. The arc only animates once the agent is
         // actually working; while queued, the named chip carries "attached".
@@ -223,7 +277,7 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
           </span>
         </Tip>
       )}
-      <div className="ml-auto flex min-w-0 shrink items-center gap-2">
+      <div className="flex min-w-0 basis-full flex-wrap items-center gap-x-2 gap-y-1">
         {typeof task.priority === 'number' && task.priority > 0 && <PriorityGlyph priority={task.priority} />}
         {task.progress && task.progress.total > 0 && (
           <Meta icon="checklist">
@@ -232,7 +286,7 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
         )}
         {Boolean(task.comment_count) && <Meta icon="comment">{task.comment_count}</Meta>}
         {links > 0 && <Meta icon="references">{links}</Meta>}
-        {task.warnings && task.warnings.count > 0 && (
+        {!terminal && task.warnings && task.warnings.count > 0 && (
           <span className="inline-flex items-center gap-0.5 text-destructive">
             <Codicon name="warning" size="0.7rem" />
             {task.warnings.count}
@@ -276,7 +330,7 @@ function Card({
       <ContextMenuTrigger asChild>
         <div
           className={cn(
-            'group relative flex cursor-grab flex-col gap-2 rounded-md border border-(--ui-stroke-tertiary) border-l-2 bg-(--ui-bg-elevated) p-2.5',
+            'group relative flex min-w-0 cursor-grab flex-col gap-2 rounded-md border border-(--ui-stroke-tertiary) border-l-2 bg-(--ui-bg-elevated) p-2.5',
             // Hover matches the provider-picker rows: a quiet primary fill;
             // selected = the theme's focus color (same as a focused input).
             'transition-colors hover:bg-primary/[0.06] active:cursor-grabbing',
@@ -304,12 +358,13 @@ function Card({
           {(arc === 'running' || arc === 'stale') && !dragging && !selected && (
             <span aria-hidden className={cn('kanban-arc', arc === 'stale' && 'kanban-arc--stale')} />
           )}
-          <span className="line-clamp-2 text-[0.8125rem] font-medium leading-snug text-foreground">
+          <span title={task.title} className="line-clamp-2 break-words text-[0.8125rem] font-medium leading-snug text-foreground">
             {task.title || task.id}
           </span>
           {summary && (
             <span className="line-clamp-2 text-[0.6875rem] leading-snug text-(--ui-text-tertiary)">{summary}</span>
           )}
+          <CardFacts task={task} />
           <CardFooter arc={arc} task={task} />
         </div>
       </ContextMenuTrigger>
@@ -994,7 +1049,13 @@ function SelectionBar({
   const bulk = useMutation({
     mutationFn: (patch: Record<string, unknown>) => bulkTasks([...selected], patch),
     onError: err => host.notify({ kind: 'error', message: errText(err) }),
-    onSuccess: data => finish(data.results.filter(r => !r.ok))
+    onSuccess: data => {
+      // Held ids are per-id refusals; only explicit release responses carry a
+      // release outcome. Keep the ordinary partial-failure report for the rest.
+      notifyBulkReadyRelease(data.results, k)
+
+      finish(data.results.filter(r => !r.ok))
+    }
   })
 
   // No bulk-delete on the backend — fan out per id, same partial-failure story.
@@ -1107,6 +1168,7 @@ export function KanbanBoardPage() {
   })
 
   const [openId, setOpenId] = useState<null | string>(null)
+  useWorkerCardNavigation(setOpenId)
   const [addStatus, setAddStatus] = useState<null | string>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -1209,6 +1271,11 @@ export function KanbanBoardPage() {
       }
 
       return { previous }
+    },
+    onSuccess: (response, vars) => {
+      // A held card is refused by the backend. Only an explicit release response
+      // carries a release outcome; this ordinary move does not grant authority.
+      notifyReadyRelease(vars.id, response, k)
     },
     onError: (err, _vars, context) => {
       if (context?.previous) {
@@ -1375,6 +1442,8 @@ export function KanbanBoardPage() {
           </Button>
         </div>
       </header>
+
+      <BackendReloadBanner archived={archived} board={board} />
 
       {settingsOpen && <OrchestrationPanel />}
 

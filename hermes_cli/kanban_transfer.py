@@ -318,6 +318,8 @@ def import_board(
                 "explicitly with --as <slug>"
             )
         target = _available_slug(requested)
+        from hermes_cli.kanban_board_authorization import require_board_creation
+        require_board_creation(target)
 
         staged_meta = _read_board_metadata(extracted / "board.json")
 

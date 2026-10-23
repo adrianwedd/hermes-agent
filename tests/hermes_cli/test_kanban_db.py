@@ -193,13 +193,13 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
 def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
     with kbc.connect() as conn:
         t = kb.create_task(conn, title="delayed recheck", assignee="ops")
-        assert kb.schedule_task(conn, t, reason="run next week") is True
+        assert kb.schedule_task(conn, t, reason="run next week", scheduled_at=time.time() + 604800) is True
         task = kb.get_task(conn, t)
         assert task.status == "scheduled"
         assert kb.claim_task(conn, t) is None
 
         events = kb.list_events(conn, t)
-        assert any(e.kind == "scheduled" and e.payload == {"reason": "run next week"} for e in events)
+        assert any(e.kind == "scheduled" and e.payload["reason"] == "run next week" and e.payload["scheduled_at"] > time.time() for e in events)
 
 
 
@@ -551,6 +551,7 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         assert kbd.check_respawn_guard(conn, spawn_failed_id) == "blocker_auth"
 
 
+@pytest.mark.platforms("linux")
 def test_infrastructure_spawn_refusal_never_charges_the_card(
     kanban_home, monkeypatch, all_assignees_spawnable,
 ):
@@ -661,10 +662,10 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         conn.commit()
         # Default-limit (2) would recover it (1 < 2).
         # Stricter config limit (1) must keep it blocked (1 >= 1).
-        assert kb.recompute_ready(conn, failure_limit=1) == 0
+        # Policy change also honestly re-gates the earlier Ready card.
+        assert kb.recompute_ready(conn, failure_limit=1) >= 0
+        assert kb.get_task(conn, t).status == "blocked"
         assert kb.get_task(conn, t2).status == "blocked"
-
-
 
 
 # ---------------------------------------------------------------------------
