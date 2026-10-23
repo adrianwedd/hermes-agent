@@ -992,6 +992,15 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
         # dispatcher spawns a child whose upstream work hasn't completed.
         if effective_status == "ready" and not kanban_db._parents_satisfied(conn, task_id):
             return False
+        if prev["status"] == "todo" and effective_status == "ready":
+            # Reject before writing: recompute_ready would immediately retract
+            # this promotion while the same preparation prerequisite is unmet.
+            from hermes_cli.kanban_readiness import preparation_reason
+            reason = preparation_reason(conn, task_id)
+            if reason:
+                raise _conflict(f"Cannot move to 'ready': {reason}")
+        if prev["status"] == effective_status == "ready":
+            return True  # A repeated ready request is not a state transition.
         was_running = prev["status"] == "running"
         cur = conn.execute(
             "UPDATE tasks SET status = ?, "
