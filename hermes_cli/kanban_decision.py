@@ -424,11 +424,8 @@ def decide(conn, task: Any, *, status_override: str | None = None, _wait_project
 
     active = bool(t.get("current_run_id") or t.get("claim_lock") or t.get("worker_pid"))
     if status in TERMINAL_STATUSES:
-        stage = "DONE" if status == "done" else "SUPERSEDED"
-        decision.update(workflow_stage=stage, reason="Accepted bounded scope is terminal",
-                        owner=None, next_action=None, current_next_action=None)
-        if remaining:
-            decision["invariant_violations"].append("DONE && remaining_required_actions")
+        from hermes_cli.kanban_decision_terminal import apply_terminal_decision
+        apply_terminal_decision(conn, task_id, status, contract_event_id, decision)
     elif active:
         decision.update(workflow_stage="RUNNING", dispatchable=True,
                         reason="A live claim owns the current action",

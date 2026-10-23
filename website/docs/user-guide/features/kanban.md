@@ -126,6 +126,11 @@ guard, not OS isolation against arbitrary direct database writes. GitHub Enterpr
 is not covered. Related publication/lifecycle work: #91230, #84254, #52311; local
 verification and publication alone are not remote acceptance.
 
+For an accepted terminal card, the current decision reports no outstanding action
+for the accepted contract. The original scope and acceptance events remain in
+history. Acceptance of an earlier contract does not clear requirements declared
+by a later revision; an unmatched terminal contract still reports the inconsistency.
+
 ## Kanban vs. `delegate_task`
 
 They look similar; they are not the same primitive.
