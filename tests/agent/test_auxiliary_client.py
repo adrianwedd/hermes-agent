@@ -3623,8 +3623,8 @@ class TestVisionAutoSkipsKimiCoding:
     on every request (#17076).
     """
 
-    def test_kimi_coding_skipped_falls_through_to_openrouter(self, monkeypatch):
-        """kimi-coding as main + vision auto → OpenRouter (not kimi)."""
+    def test_kimi_coding_skipped_without_guessing_another_provider(self, monkeypatch):
+        """kimi-coding as main + vision auto → kimi skipped, no unconfigured fallback."""
         fake_or_client = MagicMock(name="openrouter_client")
 
         monkeypatch.setattr(
@@ -3657,10 +3657,10 @@ class TestVisionAutoSkipsKimiCoding:
             fake_strict,
         )
 
-        provider, client, model = resolve_vision_provider_client()
-        assert provider == "openrouter"
-        assert client is fake_or_client
-        assert model == "google/gemini-3-flash-preview"
+        # Studio policy: with a selected main provider, vision auto never guesses
+        # another logged-in provider (_discovery_chain_allowed) — kimi is skipped
+        # and nothing unconfigured is billed in its place.
+        assert resolve_vision_provider_client() == (None, None, None)
 
 
 class TestCodexAuxiliaryAdapterTimeout:

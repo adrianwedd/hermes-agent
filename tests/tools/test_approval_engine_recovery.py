@@ -48,7 +48,6 @@ def test_public_gateway_command_guard_reports_engine_fault_without_wait(monkeypa
     monkeypatch.setattr(approval.approval_context, "_get_approval_mode", lambda: "smart")
     monkeypatch.setattr(approval, "_smart_verdict", lambda *_: "error")
     monkeypatch.setattr(approval, "_floor_block", lambda *_a, **_k: None)
-    monkeypatch.setattr(approval, "_tirith_scan", lambda *_: {"action": "allow"})
     monkeypatch.setattr(approval, "detect_dangerous_command", lambda *_: (True, "test", "test"))
     monkeypatch.setattr(approval, "_command_matches_permanent_allowlist", lambda *_: False)
     monkeypatch.setattr(approval, "is_approved", lambda *_: False)

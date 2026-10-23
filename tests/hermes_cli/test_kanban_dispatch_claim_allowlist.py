@@ -104,12 +104,14 @@ def test_allowlist_config_read_failure_skips_all_cards(
     """A broken config read must not make this shared home claim every profile."""
     from hermes_cli import config_effective
 
-    def raise_read_error(**_kwargs):
+    def raise_read_error(*_args, **_kwargs):
         raise OSError("config unavailable")
 
-    monkeypatch.setattr(config_effective, "load_user_config_effective", raise_read_error)
     with kbc.connect() as conn:
+        # Studio's persistent-workspace policy fails closed on an unreadable config,
+        # so create the card first; only the dispatcher's read is under test here.
         tid = kb.create_task(conn, title="foreign card", assignee="default")
+        monkeypatch.setattr(config_effective, "load_user_config_effective", raise_read_error)
         res = kbd.dispatch_once(conn, dry_run=True)
     assert res.spawned == []
     assert res.skipped_nonspawnable == [tid]

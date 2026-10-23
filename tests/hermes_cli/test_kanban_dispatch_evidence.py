@@ -167,6 +167,7 @@ def test_stall_receipts_coalesce_survive_reopen_and_keep_recovery(board, monkeyp
         finish_tick(conn, kbd.DispatchResult(spawned=[(tid, "worker", "")] if n % 2 else []))
     assert conn.execute("SELECT COUNT(*) FROM dispatch_evidence").fetchone()[0] == 2
     assert json.loads(conn.execute("SELECT reasons FROM dispatch_evidence ORDER BY id LIMIT 1").fetchone()[0]) == {"active_pr": 1}
+    kb.create_board("other")  # connect() no longer conjures a missing board (#43243)
     with kbc.connect_closing(board="other") as other:
         assert other.execute("SELECT COUNT(*) FROM dispatch_evidence").fetchone()[0] == 0
 
