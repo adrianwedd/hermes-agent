@@ -112,17 +112,30 @@ def test_failing_roster_reads_age_out_the_cached_children(gateway):
     monitor = SubagentMonitor(SimpleNamespace(agent=agent, _agent_running=False))
     view = gateway_tools.process_view()
     view.subagents = list(client.children)  # children were listed before the gateway stopped answering
-    view._subagents_seen = time.time()
     client.list_error = GatewayRPCError("unavailable")
     monitor.refresh()
     assert [r["subagent_id"] for r in monitor.entries] == ["sa-0-1"]  # one failed read keeps the roster
-    view._subagents_polled, view._subagents_seen = 0.0, time.time() - 61
-    monitor.refresh()
-    assert monitor.entries == []  # no answer for a minute: the ghost rows go
+    # A lost gateway is a transport fact, not an agent fact: after a minute the rows stay on
+    # display (flagged stale, fate unknown) instead of being emptied into a "nothing is running"
+    # that reads as "your children died".
     view._subagents_polled = 0.0
+    monitor.refresh()
+    assert [r["subagent_id"] for r in monitor.entries] == ["sa-0-1"]
+    assert monitor.gateway_stale is True and view.subagents_stale is True
+    # ...but an unreachable owner is not dialled once a second, nor forever while idle.
+    view._subagents_polled = 0.0
+    view.gateway_lost_since = time.time() - 61
     calls = len(client.calls)
     monitor.refresh()
-    assert len(client.calls) == calls  # and an idle session stops polling
+    assert len(client.calls) == calls  # idle and a minute gone: stop dialling
+    # A turn (busy) asks again, and an answer clears the stale mark.
+    client.list_error = None
+    view._subagents_polled = 0.0
+    monitor.refresh()
+    monitor.cli._agent_running = True
+    view._subagents_polled = 0.0
+    monitor.refresh()
+    assert monitor.gateway_stale is False and len(client.calls) > calls
 
 
 def test_detail_view_paints_the_cached_tail_and_only_the_tick_asks_the_gateway(gateway):

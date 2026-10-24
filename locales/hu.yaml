@@ -2277,6 +2277,7 @@ cli:
     heading_session_restore: "{count} · Ctrl+R visszaállítás"
     heading_session_compact: "{count} · Ctrl+R"
     subagents_heading: "Alügynökök · {count} élő · Ctrl+T kibontás · Ctrl+R összecsukás"
+    gateway_stale: "gateway unreachable · showing last known · retrying (fate unknown, nothing resent)"
     more_subagents: "+{count} további · Ctrl+T minden alügynök"
     controls_expand_collapse: " · Ctrl+T kibontás · Ctrl+R összecsukás"
     processes_heading: "Folyamatok · {summary}{controls}"

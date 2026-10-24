@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 _POLL_SECONDS = 1.0
 # A finished process stays interesting this long (main's dock RETAIN_SECONDS).
 _RETAIN_SECONDS = 60
+# While the gateway cannot be reached, ask again on this slower cadence (each ask may redial, so a
+# dead owner must not be dialled once a second), and stop dialling altogether once the streak is
+# this old. The last answered rows stay on display either way, flagged stale: a lost transport is
+# not evidence that the children died, and their fate is unknown.
+_LOSS_RETRY_SECONDS = 5.0
 
 _view = None
 
@@ -53,10 +58,19 @@ class GatewayProcessView:
         self._lock = threading.Lock()
         self.subagents: list = []
         self._subagents_polled = 0.0
-        self._subagents_seen = 0.0
         self._subagents_lock = threading.Lock()
+        # A lost gateway is a TRANSPORT fact, not an agent fact: the children's fate is unknown, so
+        # the last answered rows stay on display (marked stale) instead of being emptied into a
+        # "nothing is running" that reads as "your subagents died". Cleared by the next answer.
+        self.gateway_lost_at = None
+        self.gateway_lost_since = None
         self._tail = None
         self._subagents_watch_until = 0.0
+
+    @property
+    def subagents_stale(self) -> bool:
+        """Rows on display are the last answer from a gateway this viewer can no longer reach."""
+        return self.gateway_lost_at is not None
 
     @property
     def session_id(self):
@@ -137,27 +151,39 @@ class GatewayProcessView:
     # -- the subagent registry main's Ctrl+T monitor and dock read ---------------------------
     def watch_subagents(self, seconds=_RETAIN_SECONDS):
         """Poll ``subagent.list`` for a while even with no turn running: an off-turn spawn
-        (``/review``) moves neither ``busy`` nor the usage count the gate below reads."""
+        (``/review``) moves neither ``busy`` nor the usage count the gate below reads. A fresh
+        reason to look also re-arms dialling after a long loss (see ``subagent_rows``)."""
         self._subagents_watch_until = time.time() + seconds
         self._subagents_polled = 0.0
+        self.gateway_lost_since = None
 
     def subagent_rows(self, *, busy):
         """The session's live children (``subagent.list``). Asks at most once a second, and only
         while a turn runs (``busy``), children were listed last time, the gateway counts some, or
         an off-turn spawn asked to be watched."""
         now = time.time()
+        lost = self.gateway_lost_at is not None
         wanted = (busy or self.subagents or now < self._subagents_watch_until
                   or self.active_delegations())
-        if wanted and now - self._subagents_polled >= _POLL_SECONDS and self._subagents_lock.acquire(blocking=False):
+        if lost and not busy and self.gateway_lost_since is not None \
+                and now - self.gateway_lost_since > _RETAIN_SECONDS:
+            wanted = False  # a minute unreachable and no turn running: stop dialling (rows stay, stale)
+        cadence = _LOSS_RETRY_SECONDS if lost else _POLL_SECONDS
+        if wanted and now - self._subagents_polled >= cadence and self._subagents_lock.acquire(blocking=False):
             try:
                 self._subagents_polled = now
                 result = self.connection.call("subagent.list", session_id=self.session_id, timeout=5)
                 self.subagents = list((result or {}).get("subagents") or [])
-                self._subagents_seen = now
+                self.gateway_lost_at = self.gateway_lost_since = None
             except (GatewayClientError, RuntimeError) as exc:
+                # Cosmetic polling meets a dead or stalled gateway here. Record it, keep the last
+                # answered rows and say they are stale: an unreachable transport says nothing about
+                # whether those children are still running. The next call redials (GatewayConnection
+                # .start re-attaches this session by id), so the poll itself is the bounded retry --
+                # and nothing is resent.
                 logger.debug("subagent.list failed: %s", exc)
-                if now - self._subagents_seen > _RETAIN_SECONDS:
-                    self.subagents = []  # no answer for a minute: drop the rows and stop polling
+                self.gateway_lost_at = now
+                self.gateway_lost_since = self.gateway_lost_since or now
             finally:
                 self._subagents_lock.release()
         return [dict(row) for row in self.subagents]

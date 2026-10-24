@@ -13,6 +13,10 @@ import time
 from gateway.session_contract import CANONICAL_GATEWAY_PROTOCOL as GATEWAY_WS_PROTOCOL
 
 GATEWAY_WS_TICKET_PREFIX = "hermes-gateway-ticket."
+# The one wording for "the socket went away": the request may have reached the owner, so its outcome
+# is genuinely unknown and the work must never be resent automatically.
+DISCONNECTED = ("Gateway disconnected; turn outcome is unknown. Resume the printed session ID to check "
+                "whether it completed or was interrupted; do not resend the work.")
 # Per-request answer budget. Owner verbs are admissions/reads that answer promptly; the one that
 # legitimately runs long passes its own budget (``rpc(..., _timeout=...)``).
 DEFAULT_RPC_TIMEOUT = 30
@@ -32,6 +36,11 @@ EVENT_STALL_TIMEOUT = 30
 # queue's only consumer). Bounded: past either cap the reader waits for the consumer again.
 EVENT_OVERFLOW_FRAMES = 16384
 EVENT_OVERFLOW_BYTES = 8 * 1024 * 1024
+# Transport keepalive for a REMOTE (non-loopback) owner: the library cadence, unchanged, so a
+# dropped tunnel or proxy idle-timeout is still detected. A loopback owner gets no WS ping at all
+# (see ``_keepalive_kwargs``): the ping cannot distinguish a healthy peer from a busy one there.
+REMOTE_WS_PING_INTERVAL_S = 20
+REMOTE_WS_PING_TIMEOUT_S = 20
 
 
 def gateway_ws_target(endpoint, ticket):
@@ -41,6 +50,47 @@ def gateway_ws_target(endpoint, ticket):
     latter; callers check ``ws.subprotocol == GATEWAY_WS_PROTOCOL`` after the upgrade."""
     url = endpoint.api_origin.replace("https:", "wss:").replace("http:", "ws:") + "/api/ws"
     return url, [GATEWAY_WS_PROTOCOL, GATEWAY_WS_TICKET_PREFIX + ticket]
+
+
+def _keepalive_kwargs(url: str) -> dict:
+    """``websockets.connect`` keepalive kwargs for *url*: none on loopback, the library cadence remote.
+
+    A loopback owner shares this host's GIL, and its event loop is knowingly blockable: a hook that
+    calls something synchronous (``subprocess.call(["afplay", ...])`` for TTS playback, a sqlite
+    write, a large ``json.dumps``) freezes the loop for the whole duration while the connection
+    itself is perfectly healthy. websockets' default 20/20 keepalive then answers that freeze with
+    ``sent 1011 (internal error) keepalive ping timeout``, and every caller reads a live gateway as
+    a dead one. The ping detects nothing here that the transport does not: a dead loopback peer
+    sends a real FIN/RST, which surfaces as ``WebSocketDisconnect``/``ConnectionClosed``, while a
+    frozen loop is bounded by ``DEFAULT_RPC_TIMEOUT`` and ``EVENT_STALL_TIMEOUT`` instead. So the
+    ping is off on loopback -- the same call already made for uvicorn's WS ping on a loopback
+    listener (``web_server_lifecycle.build_listener_server``) and for the CDP client. A remote
+    (tunnelled/proxied) owner keeps the cadence: there the ping does detect a half-open socket.
+    """
+    return {} if _is_loopback_url(url) else {
+        "ping_interval": REMOTE_WS_PING_INTERVAL_S,
+        "ping_timeout": REMOTE_WS_PING_TIMEOUT_S,
+    }
+
+
+def _is_loopback_url(url: str) -> bool:
+    """True for ``localhost``/any loopback IP literal. Stdlib only, on purpose.
+
+    This module stays dependency-free (see the module docstring): importing ``agent.proxy_bypass``
+    for the same predicate pulls the whole ``agent`` package in at dial time, which is far more
+    work than a socket open should cost and reaches real-home state under a redirected
+    ``HERMES_HOME``. The predicate mirrors ``agent.proxy_bypass.is_loopback_host``.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    host = str(urlsplit(str(url or '')).hostname or '').strip('[]').lower()
+    if host == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class GatewayClientError(ValueError):
@@ -194,8 +244,7 @@ class GatewayClient:
         except (ConnectionClosed, OSError, ValueError, TimeoutError):
             pass
         finally:
-            error = GatewayClientError("Gateway disconnected; turn outcome is unknown. "
-                "Resume the printed session ID to check whether it completed or was interrupted; do not resend the work.")
+            error = GatewayClientError(DISCONNECTED)
             for future in self.pending.values():
                 if not future.done():
                     future.set_exception(error)
@@ -215,7 +264,15 @@ class GatewayClient:
         self.pending[rid] = future
         self.events.moved.set()  # a reader waiting on the consumer reads on toward this answer
         try:
-            await self.websocket.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}))
+            try:
+                await self.websocket.send(json.dumps(
+                    {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}))
+            except Exception as exc:  # health: allow BLE001 -- every send failure is a transport failure
+                # A keepalive timeout, a mid-turn hang-up or a closed socket all land here, and a
+                # library exception (``ConnectionClosedError``) must never reach a caller: it would
+                # read as an agent failure and, uncaught, kill the caller's thread. The send may
+                # have reached the owner, so the outcome is unknown -- say exactly that.
+                raise GatewayClientError(DISCONNECTED) from exc
             budget = DEFAULT_RPC_TIMEOUT if _timeout is None else _timeout
             return await asyncio.wait_for(future, None if budget == float("inf") else budget)
         finally:
@@ -302,7 +359,7 @@ async def connect_gateway(endpoint=None, subject=None):
         # user's HTTP(S) proxy; websockets>=14 reads HTTP_PROXY/HTTPS_PROXY by default and a proxy that
         # cannot reach 127.0.0.1 turns every launch into a 10 s open timeout.
         async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024,
-                           proxy=None) as ws:
+                           proxy=None, **_keepalive_kwargs(url)) as ws:
             if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
                 raise GatewayClientError("Gateway protocol mismatch; update/restart required")
             async with GatewayClient(ws) as client:

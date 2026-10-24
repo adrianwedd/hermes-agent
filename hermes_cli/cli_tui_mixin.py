@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 import queue
 import shutil
@@ -42,6 +43,8 @@ from typing import Optional
 from hermes_cli.cli_footer_split import FooterSplit
 from hermes_cli.cli_panel import _Panel
 from hermes_cli.cli_tui_wrap import _prefix_wrapped_rows, _wrap_rows
+
+_tui_logger = logging.getLogger(__name__)
 
 # Rows below an overlay panel taken by spinner/tool-progress, status bar, input, separators and
 # prompt symbol (measured ~6 during live PTY approval prompts) — shared by every panel budget.
@@ -409,7 +412,14 @@ class CLITuiMixin:
                 continue
             monitor = getattr(self, "_subagent_monitor", None)
             if monitor is not None:
-                monitor.tick()
+                # A cosmetic poll must never kill this thread: an exception escaping here prints an
+                # uncaught background-thread traceback into the user's terminal and stops every later
+                # repaint (spinner, dock, status bar). The monitor's own poll reports a lost gateway
+                # in the dock; anything else is a bug worth one debug line, not a dead UI.
+                try:
+                    monitor.tick()
+                except Exception:  # health: allow BLE001 -- see above; the loop must survive
+                    _tui_logger.debug("subagent monitor tick failed", exc_info=True)
             if self._command_running:
                 self._invalidate(min_interval=0.1)
                 time.sleep(0.1)

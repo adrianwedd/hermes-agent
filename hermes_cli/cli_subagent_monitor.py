@@ -43,6 +43,9 @@ class SubagentMonitor:
         self.opening = False
         self.collapsed = False
         self.detail = False  # the monitor's detail view is open (its tick fetches the gateway tail)
+        # Last poll could not reach the gateway: the rows below are the last answer, not a live
+        # view, and that says nothing about whether the children are still running.
+        self.gateway_stale = False
 
     @property
     def has_rows(self):
@@ -79,7 +82,9 @@ class SubagentMonitor:
 
     def refresh(self, now=None):
         now = time.time() if now is None else now
-        entries = self.subagents().subagent_rows(busy=bool(getattr(self.cli, '_agent_running', False)))
+        backend = self.subagents()
+        entries = backend.subagent_rows(busy=bool(getattr(self.cli, '_agent_running', False)))
+        self.gateway_stale = bool(getattr(backend, 'subagents_stale', False))
         for row in entries:
             row['elapsed'] = max(0, int(now - (row.get('started_at') or now)))
             row['last_tool'] = row.get('last_tool') or ''
@@ -197,6 +202,15 @@ class SubagentMonitor:
         # The loop's state is already the heading's badge; its prompt is the activity.
         return self.goal or self.loop_prompt or t('cli.subagents.next_queued', text=self.queued[0])
 
+    def _stale_note(self):
+        """The one-line truth for a lost gateway: last known rows, fate unknown, still retrying.
+
+        Placeholder-free on purpose: the heading beside it already carries the count, and an
+        English-only key with no ``{token}`` falls back cleanly in a locale that has not been
+        translated yet (``tests/agent/test_i18n.py`` pins placeholder parity, not coverage).
+        """
+        return t('cli.subagents.gateway_stale') if self.gateway_stale else ''
+
     def dock_text(self, *, columns, rows):
         if not self.has_rows:
             return ''
@@ -222,6 +236,8 @@ class SubagentMonitor:
             room = width - get_cwidth(heading + ' · ')
             if get_cwidth(activity) <= room or (room >= 12 and not (self.entries or self.processes)):
                 heading += ' · ' + _clip(activity, room)
+            if self.gateway_stale:
+                heading = '! ' + heading  # last known rows: the gateway is unreachable, not idle
             return _clip(' ' + heading, max(0, columns))
         columns = max(0, columns - 2)
         lines = [_clip(f' {row}', columns) for row in (self.goal, self.loop) if row]
@@ -232,6 +248,8 @@ class SubagentMonitor:
         if self.entries:
             hidden = len(self.entries) - agent_count
             lines.append(_clip(' ' + t('cli.subagents.subagents_heading', count=len(self.entries)), columns))
+            if self.gateway_stale:
+                lines.append(_clip(' ' + self._stale_note(), columns))
             for row in self.entries[:agent_count]:
                 activity = f"{row['elapsed']}s · " + self._agent_activity(row)
                 # Reserve activity even on narrow terminals; task names use the remainder.
@@ -352,6 +370,8 @@ def build_monitor_application(monitor, **kwargs):
     def header():
         row = monitor.selected
         title = f"{monitor._title()} · {monitor._counts(session=False)}"
+        if monitor.gateway_stale:
+            title += ' · ' + monitor._stale_note()
         if monitor.detail and row:
             title += f" · {monitor._key(row)} · {row.get('goal') or row.get('command') or ''}"
         return [('class:subagent-dock.heading', _clip(title, app.output.get_size().columns))]

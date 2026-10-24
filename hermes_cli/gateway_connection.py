@@ -16,12 +16,12 @@ import queue
 import threading
 import time
 
-from hermes_cli.gateway_client import DEFAULT_RPC_TIMEOUT, RESUME_KEY_MISMATCH, GatewayClientError, GatewayRPCError
+from hermes_cli.gateway_client import (
+    DEFAULT_RPC_TIMEOUT, DISCONNECTED, RESUME_KEY_MISMATCH, GatewayClientError, GatewayRPCError,
+)
 
 logger = logging.getLogger(__name__)
 
-DISCONNECTED = ("Gateway disconnected; turn outcome is unknown. Resume the printed session ID to check "
-                "whether it completed or was interrupted; do not resend the work.")
 # A request refused before it reached any socket: nothing is in doubt, so never the copy above.
 NOT_SENT = "Gateway disconnected before the request was sent; nothing was sent."
 # ``session.resume`` refusals that mean "this viewer may not open that session": the caller keeps the
@@ -498,3 +498,11 @@ class GatewayConnection:
         except TimeoutError as exc:
             future.cancel()
             raise GatewayClientError(f"Gateway did not answer {method}") from exc
+        except GatewayClientError:  # includes CallStopped: already the caller's verdict
+            raise
+        except Exception as exc:  # health: allow BLE001 -- no library exception may reach a caller
+            # A transport failure that websockets raised itself (``ConnectionClosedError`` from a
+            # keepalive timeout or a mid-turn hang-up) is not an agent failure and must never escape
+            # as an uncaught background-thread traceback: callers (status polling, the subagent
+            # monitor) catch ``GatewayClientError`` and every one of them is a plain ``except``.
+            raise GatewayClientError(DISCONNECTED) from exc

@@ -2260,6 +2260,7 @@ cli:
     heading_session_restore: "{count} · Ctrl+R 복원"
     heading_session_compact: "{count} · Ctrl+R"
     subagents_heading: "서브에이전트 · {count}개 진행 중 · Ctrl+T 펼치기 · Ctrl+R 접기"
+    gateway_stale: "gateway unreachable · showing last known · retrying (fate unknown, nothing resent)"
     more_subagents: "+{count}개 더 · Ctrl+T 모든 서브에이전트"
     controls_expand_collapse: " · Ctrl+T 펼치기 · Ctrl+R 접기"
     processes_heading: "프로세스 · {summary}{controls}"

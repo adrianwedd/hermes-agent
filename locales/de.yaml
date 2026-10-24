@@ -2260,6 +2260,7 @@ cli:
     heading_session_restore: "{count} · Ctrl+R wiederherstellen"
     heading_session_compact: "{count} · Ctrl+R"
     subagents_heading: "Subagenten · {count} aktiv · Ctrl+T aufklappen · Ctrl+R einklappen"
+    gateway_stale: "gateway unreachable · showing last known · retrying (fate unknown, nothing resent)"
     more_subagents: "+{count} weitere · Ctrl+T alle Subagenten"
     controls_expand_collapse: " · Ctrl+T aufklappen · Ctrl+R einklappen"
     processes_heading: "Prozesse · {summary}{controls}"
