@@ -42,3 +42,21 @@ def reset_review_attended(token: contextvars.Token[bool]) -> None:
 
 def is_unattended_review() -> bool:
     return is_background_review() and not _review_attended.get()
+
+
+# Copied into tool-worker contexts with the existing write origin. Metadata only;
+# this never grants permission or replaces mutation locks and write gates.
+_review_provenance: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "skill_review_provenance", default=None)
+
+
+def set_review_provenance(metadata: dict) -> contextvars.Token:
+    return _review_provenance.set(dict(metadata))
+
+
+def reset_review_provenance(token: contextvars.Token) -> None:
+    _review_provenance.reset(token)
+
+
+def get_review_provenance() -> dict:
+    return dict(_review_provenance.get() or {})

@@ -287,185 +287,53 @@ CURATOR_DRY_RUN_BANNER = (
 )
 
 
-CURATOR_REVIEW_PROMPT = (
-    "You are running as Hermes' background skill CURATOR. This is an "
-    "UMBRELLA-BUILDING consolidation pass, not a passive audit and not a "
-    "duplicate-finder.\n\n"
-    "The goal of the skill collection is a LIBRARY OF CLASS-LEVEL "
-    "INSTRUCTIONS AND EXPERIENTIAL KNOWLEDGE. A collection of hundreds of "
-    "narrow skills where each one captures one session's specific bug is "
-    "a FAILURE of the library — not a feature. An agent searching skills "
-    "matches on descriptions, not on exact names (note: long descriptions "
-    "are truncated to 57 chars in the system prompt skill index — keep the "
-    "trigger class in that window). One broad umbrella "
-    "skill with labeled subsections beats five narrow siblings for "
-    "discoverability, not the other way around.\n\n"
-    "The right target shape is CLASS-LEVEL skills whose SKILL.md carries the "
-    "always-on rules and whose `references/`, `templates/`, and `scripts/` hold a "
-    "SMALL set of topical depth — not one-session-one-skill micro-entries, and "
-    "not an umbrella that hoards one references/ file per absorbed sibling. "
-    "Consolidation means DISTILLING: the absorbed content becomes rules "
-    "(imperative + one clause of why), the same lesson stated twice becomes "
-    "one rule, and incident narration, PR/issue numbers, dates and quoted "
-    "chatter are dropped — the rule must stand without the story. Moving a "
-    "file unchanged under references/ is filing, not consolidating. A SKILL.md "
-    "body over ~24k chars is a consolidation target on its own: skill_view loads "
-    "all of it into context for the rest of the session, so distill it to the "
-    "always-on rules and push topic depth into references/.\n\n"
-    "Hard rules — do not violate:\n"
-    "1. DO NOT touch bundled, hub-installed, or external-dir skills "
-    "(`skills.external_dirs`). The candidate list below is already filtered "
-    "to local curator-managed skills only; external skills are externally "
-    "owned and read-only to this background curator.\n"
-    "2. DO NOT delete any skill. Archiving (moving the skill's directory "
-    "into ~/.hermes/skills/.archive/) is the maximum destructive action. "
-    "Archives are recoverable; deletion is not.\n"
-    "3. DO NOT touch skills shown as pinned=yes. Skip them entirely.\n"
-    "3b. DO NOT archive, delete, consolidate, move, or otherwise modify any "
-    "skill named in the protected built-ins list (currently: plan). These "
-    "back load-bearing UX (slash-command entry points referenced in docs and "
-    "tips) and are filtered out of the candidate list below — never resurrect "
-    "one as an archive or absorb target.\n"
-    "3c. DO NOT archive or prune any skill marked `cron=yes` in the candidate "
-    "list. A cron job depends on it and will fail to load it on its next "
-    "run. You MAY still consolidate it into an umbrella — but only because "
-    "the curator rewrites cron job skill references to follow consolidations; "
-    "never simply prune it.\n"
-    "4. DO NOT use usage counters as a reason to skip consolidation. The "
-    "counters are new and often mostly zero. Judge overlap on CONTENT, "
-    "not on use_count. 'use=0' is not evidence a skill is valuable; it's "
-    "absence of evidence either way. Corollary: 'use=0' is ALSO not a "
-    "reason to PRUNE a skill. Never archive a never-used skill (use=0) "
-    "unless it is at least 30 days old (check last_activity / created date) "
-    "AND its content is genuinely obsolete or fully absorbed elsewhere — a "
-    "recently-created skill simply may not have had its trigger come up yet.\n"
-    "5. DO NOT reject consolidation on the grounds that 'each skill has "
-    "a distinct trigger'. Pairwise distinctness is the wrong bar. The "
-    "right bar is: 'would a human maintainer write this as N separate "
-    "skills, or as one skill with N labeled subsections?' When the "
-    "answer is the latter, merge.\n\n"
-    "How to work — not optional:\n"
-    "1. Scan the full candidate list. Identify PREFIX CLUSTERS (skills "
-    "sharing a first word or domain keyword). Examples you are likely "
-    "to find: hermes-config-*, hermes-dashboard-*, gateway-*, codex-*, "
-    "ollama-*, anthropic-*, gemini-*, mcp-*, salvage-*, pr-*, "
-    "competitor-*, python-*, security-*, etc. Expect 10-25 clusters.\n"
-    "2. For each cluster with 2+ members, do NOT ask 'are these pairs "
-    "overlapping?' — ask 'what is the UMBRELLA CLASS these skills all "
-    "serve? Would a maintainer name that class and write one skill for "
-    "it?' If yes, pick (or create) the umbrella and absorb the siblings "
-    "into it.\n"
-    "3. Three ways to consolidate — use the right one per cluster:\n"
-    "   a. MERGE INTO EXISTING UMBRELLA — one skill in the cluster is "
-    "already broad enough to be the umbrella (example: `pr-triage-"
-    "salvage` for the PR review cluster). Patch it to add a labeled "
-    "section for each sibling's unique insight, then archive the "
-    "siblings.\n"
-    "   b. CREATE A NEW UMBRELLA SKILL.md — no existing member is broad "
-    "enough. Use skill_manage action=create to write a new class-level "
-    "skill whose SKILL.md covers the shared workflow and has short "
-    "labeled subsections. Archive the now-absorbed narrow siblings.\n"
-    "   c. DEMOTE TO REFERENCES/TEMPLATES/SCRIPTS — a sibling has "
-    "narrow-but-valuable depth that is only needed sometimes. Distill it "
-    "into the umbrella's appropriate support directory:\n"
-    "      • `references/<topic>.md` — named by TOPIC, merged into an "
-    "existing topical file when one covers it (decision tables, recipes, "
-    "provider quirks, condensed domain notes). Never `<sibling-name>.md` "
-    "copied verbatim; never a per-incident file.\n"
-    "      • `templates/<name>.<ext>` for starter files meant to be "
-    "copied and modified\n"
-    "      • `scripts/<name>.<ext>` for statically re-runnable actions "
-    "(verification scripts, fixture generators, probes)\n"
-    "      Then archive the old sibling. Re-home the content through the "
-    "LEDGERED tool surface: `skill_manage action=write_file` on the umbrella "
-    "to place the file (subdirectories are created for you), then "
-    "`skill_manage action=remove_file` on the source to drop the original, "
-    "then `skill_manage action=delete` on the source. Never a terminal move "
-    "— a shell mv/cp writes the same bytes with no ledger entry, so the "
-    "archive that follows snapshots an already-stripped package and "
-    "`hermes curator rollback` restores a hollow skill (issue #96962).\n\n"
-    "Package integrity — not optional:\n"
-    "Before demoting or archiving a skill, inspect it as a COMPLETE "
-    "directory package, not just SKILL.md. A skill root may include "
-    "`references/`, `templates/`, `scripts/`, and `assets/`; `skill_view` "
-    "discovers those relative to the skill root. A reference markdown file "
-    "inside another skill is NOT a new skill root and does not get its own "
-    "linked-file discovery.\n"
-    "If the source skill has support files OR SKILL.md contains relative "
-    "links such as `references/...`, `templates/...`, `scripts/...`, or "
-    "`assets/...`, DO NOT flatten only SKILL.md into "
-    "`<umbrella>/references/<old>.md`. Choose one safe path instead:\n"
-    "   • keep it as a standalone skill, OR\n"
-    "   • fully merge it by re-homing every needed support file into the "
-    "umbrella's canonical `references/`, `templates/`, `scripts/`, or "
-    "`assets/` directories AND rewrite the destination instructions to "
-    "the new paths, OR\n"
-    "   • archive the entire original skill package unchanged.\n"
-    "Never leave archived/demoted instructions pointing at files that were "
-    "left behind under the old skill directory.\n"
-    "4. Also flag skills whose NAME is too narrow (contains a PR number, "
-    "a feature codename, a specific error string, an 'audit' / "
-    "'diagnosis' / 'salvage' session artifact). These almost always "
-    "belong as a subsection or support file under a class-level umbrella.\n"
-    "5. Iterate. After one consolidation round, scan the remaining set "
-    "and look for the NEXT umbrella opportunity. Don't stop after 3 "
-    "merges.\n\n"
-    "Your toolset:\n"
-    "  - skills_list, skill_view        — read the current landscape\n"
-    "    READ BEFORE WRITE — enforced, not advisory. Before skill_manage "
-    "action=patch, action=write_file on a file that already "
-    "exists, or action=remove_file, call skill_view on that SAME target in "
-    "this review turn — skill_view(name) for SKILL.md, "
-    "skill_view(name, file_path=...) for a supporting file — and build the "
-    "write from the content it just returned. A write without that read is "
-    "REFUSED and nothing is saved.\n"
-    "  - skill_manage action=patch      — add sections to the umbrella\n"
-    "  - skill_manage action=create     — create a new umbrella SKILL.md\n"
-    "  - skill_manage action=write_file — add a references/, templates/, "
-    "or scripts/ file under an existing skill (the skill must already "
-    "exist)\n"
-    "  - skill_manage action=delete     — archive a skill. MUST pass "
-    "`absorbed_into=<umbrella>` naming the skill you merged its content "
-    "into (the umbrella must already exist). Deletes without a verified "
-    "forwarding target are refused — pruning with no absorption target is "
-    "the deterministic staleness pass's job, never this one's. "
-    "`absorbed_into` drives cron-job skill-reference migration — "
-    "guessing from your YAML summary after the fact is fragile.\n"
-    "  You have NO terminal access in this pass — every filesystem mutation "
-    "goes through skill_manage above so it is ledgered and rollback-able "
-    "(issue #96962). Reading files works through skill_view (including "
-    "skill_view(name, file_path=...) for support files).\n\n"
-    "'keep' is a legitimate decision ONLY when the skill is already a "
-    "class-level umbrella and none of the proposed merges would improve "
-    "discoverability. 'This is narrow but distinct from its siblings' "
-    "is NOT a reason to keep — it's a reason to move it under an "
-    "umbrella as a subsection or support file.\n\n"
-    "Expected output: real umbrella-ification. Process every obvious "
-    "cluster. If you end the pass with fewer than 10 archives, you "
-    "stopped too early — go back and look at the clusters you left "
-    "alone.\n\n"
-    "When done, write a human summary AND a structured machine-readable "
-    "block so downstream tooling can distinguish consolidation from "
-    "pruning. Format EXACTLY:\n\n"
-    "## Structured summary (required)\n"
-    "```yaml\n"
-    "consolidations:\n"
-    "  - from: <old-skill-name>\n"
-    "    into: <umbrella-skill-name>\n"
-    "    reason: <one short sentence — why merged, not just 'similar'>\n"
-    "prunings:\n"
-    "  - name: <skill-name>\n"
-    "    reason: <one short sentence — why archived with no merge target>\n"
-    "```\n\n"
-    "Every skill you moved to .archive/ MUST appear in exactly one of the "
-    "two lists. If you consolidated X into umbrella Y (patched Y, wrote "
-    "a references file to Y, or created Y with X's content absorbed), X "
-    "goes under `consolidations` with `into: Y`. If you archived X with "
-    "no absorption — truly stale, irrelevant, or obsolete — X goes under "
-    "`prunings`. Leave a list empty (`consolidations: []`) if none. Do "
-    "not omit the block. The block comes AFTER your human-readable "
-    "summary of clusters processed, patches made, and decisions left alone."
-)
+CURATOR_REVIEW_PROMPT = """You are Hermes' background skill curator. Preserve useful knowledge and improve
+incorrect or confusing procedures when the evidence supports a change. Keeping a
+skill unchanged is a valid outcome. There is no minimum number of edits or archives.
+Skill size, name prefixes, distinct triggers and zero usage are not defects by themselves.
+
+Read candidate packages and compare actual procedures before deciding. Preserve
+source events, dates, versions, applicability and supersession pointers in references
+or provenance records when shortening a body. A factual correction must follow its
+source; do not turn a tentative session explanation into a universal rule.
+
+Hard boundaries:
+- Touch only offered local curator-managed candidates. Never modify bundled,
+  hub-installed, external, pinned or protected built-in skills (including plan).
+- Never delete a package. An authorised consolidation may archive a complete original
+  package unchanged; retain every support file. Do not remove source support files
+  before archival. Existing cron references must resolve after a consolidation.
+- Do not archive a never-used skill unless it is at least 30 days old and its
+  content is demonstrably obsolete or fully preserved elsewhere. Counters alone
+  cannot establish benefit, staleness or correctness.
+- Preserve the operator's canonical-repository, no-unrelated-cleanup and authority
+  requirements. A review does not authorise new external services, spend or bypasses.
+
+Use skills_list and skill_view to inspect the complete package. READ BEFORE WRITE:
+before patch/edit or overwrite/remove of an existing support file, call skill_view
+on that exact target during this review. Base the write on its current content.
+
+Prefer a focused correction to an existing procedure. When consolidation is justified,
+copy required content through skill_manage, rewrite destination links, and verify
+complete support-file coverage before archiving the intact source with
+skill_manage(action=delete, absorbed_into=<existing destination>). Do not strip the
+source. Stop if the existing tool cannot preserve and recover the complete package;
+report the constraint instead of simulating an atomic migration. No terminal mutations.
+
+Keep useful distinct skills. Stop when no further evidenced improvement is available;
+zero changes is successful when no correction is supported. No compulsory benchmark.
+
+Write a concise human summary and the existing structured summary:
+## Structured summary (required)
+```yaml
+consolidations: []
+prunings: []
+```
+For each actual archive, use exactly one entry: consolidation entries have `from`,
+`into` and `reason`; pruning entries have `name` and `reason`. Never invent an archive
+to populate the lists. Preserve the candidate protection and cron migration checks.
+"""
+
 
 
 # --- Per-run reports — {YYYYMMDD-HHMMSS}/run.json + REPORT.md under logs/curator/ ---
@@ -1134,10 +1002,22 @@ def _run_llm_review(prompt: str) -> dict[str, Any]:
             from tools.skill_manager_guards import _reset_background_review_read_marks
 
             _reset_background_review_read_marks()
+        from tools.skill_provenance import set_review_provenance, reset_review_provenance
+        import hashlib
+        import uuid
+        provenance_token = set_review_provenance({
+            "mechanism": "curator_consolidation", "run_id": uuid.uuid4().hex,
+            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+            "session_id": getattr(review_agent, "session_id", None),
+            "model": model_name, "provider": rp.get("provider"),
+        })
         # Silence the fork's tool-call chatter (CLI synchronous foreground runs).
-        with open(os.devnull, "w", encoding="utf-8") as devnull, \
-             contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-            conv_result = review_agent.run_conversation(user_message=prompt)
+        try:
+            with open(os.devnull, "w", encoding="utf-8") as devnull, \
+                 contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                conv_result = review_agent.run_conversation(user_message=prompt)
+        finally:
+            reset_review_provenance(provenance_token)
         final = str(conv_result.get("final_response") or "").strip() if isinstance(conv_result, dict) else ""
         result_meta["final"] = final
         result_meta["summary"] = (final[:240] + "…") if len(final) > 240 else (final or "no change")

@@ -446,14 +446,14 @@ _DO_NOT_CAPTURE_BLOCK = (
 )
 
 _SKILL_REVIEW_PROMPT = (
-    "Review the conversation above and update the skill library. Be ACTIVE — most sessions produce "
-    "at least one skill update, even if small. A pass that does nothing is a missed learning "
-    "opportunity, not a neutral outcome.\n\n"
+    "Prefer the owning repository procedure for project-specific knowledge. Retain a source pointer, scope and uncertainty for generalised lessons; repair an existing incorrect rule rather than appending its opposite. Do not require per-memory approval or a benchmark. Review the conversation above for supported improvements to existing procedures. "
+    "Check the owning repository first, then current skills; preserve evidence and applicability. "
+    "A no-change review is valid when no correction is supported.\n\n"
     "Target shape of the library: CLASS-LEVEL skills, each with a SKILL.md of always-on rules and a "
     "small `references/` set of topical depth. Not a flat list of narrow one-session skills, and "
-    "not an umbrella hoarding a references/ file per session. This shapes HOW you update, not "
-    "WHETHER you update.\n\n" + _LESSON_LAYER_BLOCK +
-    "Signals to look for (any one of these warrants action):\n"
+    "not an umbrella hoarding a references/ file per session. This guides a justified update, not "
+    "a quota to change anything.\n\n" + _LESSON_LAYER_BLOCK +
+    "Signals to investigate (verify before deciding to write):\n"
     "  • User corrected your style, tone, format, legibility, or verbosity. Frustration signals "
     "like 'stop doing X', 'this is too verbose', 'don't format like this', 'why are you "
     "explaining', 'just give me the answer', 'you always do Y and I hate it', or an explicit "
@@ -465,7 +465,7 @@ _SKILL_REVIEW_PROMPT = (
     "that a future session would benefit from. Capture it.\n"
     "  • A skill that got loaded or consulted this session turned out to be wrong, missing a step, "
     "or outdated. Patch it NOW.\n\n"
-    "Preference order — prefer the earliest action that fits, but do pick one when a signal above "
+    "Preference order — prefer the earliest action that fits, only when a verified correction is missing and a signal above "
     "fired:\n"
     "  1. UPDATE A CURRENTLY-LOADED SKILL. Look back through the conversation for skills the user "
     "loaded via /skill-name or you read via skill_view. If any of them covers the territory of the "
@@ -511,21 +511,21 @@ _SKILL_REVIEW_PROMPT = (
     "If you notice two existing skills that overlap, note it in your reply — the background "
     "curator handles consolidation at scale. Never delete a skill here.\n\n"
     "Do NOT capture" + _DO_NOT_CAPTURE_BLOCK +
-    "'Nothing to save.' is a real option but should NOT be the default. If the session ran "
+    "'Nothing to save.' is a valid outcome. Preserve autonomous learning without an edit quota. If the session ran "
     "smoothly with no corrections and produced no new technique, just say 'Nothing to save.' and "
-    "stop. Otherwise, act."
+    "stop. Act only when a verified missing correction remains."
 )
 
 _COMBINED_REVIEW_PROMPT = (
     "Review the conversation above and update two things:\n\n"
     "**Memory**: " + _MEMORY_ROUTING_BLOCK +
-    "**Skills**: how to do this class of task. Be ACTIVE — most sessions produce at least one "
-    "skill update. A pass that does nothing is a missed learning opportunity, not a neutral "
-    "outcome.\n\n"
+    "**Skills**: preserve supported procedures in the owning repository first. "
+    "Check existing guidance before writing; no change is valid when it is already correct. "
+    "\n\n"
     "Target shape of the skill library: CLASS-LEVEL skills with a SKILL.md of always-on rules and a "
     "small `references/` set of topical depth — not narrow one-session skills, and not an umbrella "
     "hoarding a references/ file per session.\n\n" + _LESSON_LAYER_BLOCK +
-    "Signals that warrant a skill update (any one is enough):\n"
+    "Signals to investigate before a skill update:\n"
     "  • User corrected your style, tone, format, legibility, verbosity, or approach. Frustration "
     "is a FIRST-CLASS skill signal, not just a memory signal. 'stop doing X', 'don't format like "
     "this', 'I hate when you Y' — embed the lesson in the skill that governs that task so the next "
@@ -1180,18 +1180,29 @@ def _run_review_fork(
         from tools.skill_manager_guards import _reset_background_review_read_marks
 
         _reset_background_review_read_marks()
+    from tools.skill_provenance import set_review_provenance, reset_review_provenance
+    import hashlib
+    import uuid
+    full_prompt = (prompt + "\n\nYou can only call " + memory_phrase_prompt +
+                   "management tools. Other tools will be denied "
+                   "at runtime — do not attempt them." + prompt_extra)
+    provenance_token = set_review_provenance({
+        "mechanism": "post_turn_background_review", "run_id": uuid.uuid4().hex,
+        "prompt_sha256": hashlib.sha256(full_prompt.encode()).hexdigest(),
+        "parent_session_id": getattr(agent, "session_id", None),
+        "model": getattr(st.review_agent, "model", None),
+        "provider": getattr(st.review_agent, "provider", None),
+        "attended": explicit,
+    })
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
             # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
             st.review_agent.run_conversation(
-                user_message=(
-                    prompt + "\n\nYou can only call " + memory_phrase_prompt +
-                    "management tools. Other tools will be denied "
-                    "at runtime — do not attempt them." + prompt_extra
-                ),
+                user_message=full_prompt,
                 conversation_history=_digest_history(messages_snapshot) if _routed else messages_snapshot,
             )
     finally:
+        reset_review_provenance(provenance_token)
         clear_thread_tool_whitelist()
         # Attribute usage to the PARENT session. Snapshot BEFORE unregister/close so counters
         # survive teardown, and in this finally so a fork that consumed tokens then raised is

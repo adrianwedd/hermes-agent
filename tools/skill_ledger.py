@@ -295,6 +295,31 @@ def _delta(before: list[dict[str, str]], after: list[dict[str, str]]) -> tuple[l
             [i for i in after if str(i.get("path")) not in same])
 
 
+def _continuity_breaks(before: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Describe externally changed paths without rewriting their previous history."""
+    wanted = {item["path"]: item["sha256"] for item in before}
+    previous = {}
+    raw = _read_ledger("continuity unavailable", quiet_missing=True)
+    for line in reversed((raw or b"").decode("utf-8").splitlines()):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        after = {item["path"]: item["sha256"] for item in row.get("after", []) or []
+                 if isinstance(item, dict) and "path" in item and "sha256" in item}
+        changed = set(after) | {item["path"] for item in row.get("before", []) or []
+                                if isinstance(item, dict) and "path" in item}
+        for path in changed & wanted.keys() - previous.keys():
+            previous[path] = (after.get(path), row.get("id"))
+        if len(previous) == len(wanted):
+            break
+    return [{"path": path, "previous_sha256": sha, "observed_before_sha256": wanted[path],
+             "previous_entry_id": entry_id}
+            for path, (sha, entry_id) in previous.items() if sha != wanted[path]]
+
+
 def append_entry(
     action: str, skill: str, before: Optional[list[dict[str, str]]] = None,
     after: Optional[list[dict[str, str]]] = None, actor: Optional[str] = None,
@@ -311,9 +336,18 @@ def append_entry(
             "actor": actor if actor in _VALID_ACTORS else derive_actor(),
             "action": action, "skill": skill, "evidence": evidence or {},
             "before": before or [], "after": after or []}
+        from tools.skill_provenance import get_current_write_origin, get_review_provenance
+        metadata = get_review_provenance()
+        metadata.setdefault("mechanism", get_current_write_origin())
+        metadata.update(entry["evidence"])
+        entry["evidence"] = metadata
         path = ledger_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with _ledger_lock():
+            gaps = _continuity_breaks(before or [])
+            if gaps:
+                entry["evidence"]["continuity_discontinuities"] = gaps
+                logger.warning("skill_ledger: observed %d external path changes for %s", len(gaps), skill)
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
             _maintain_size()
