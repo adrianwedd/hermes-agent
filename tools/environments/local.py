@@ -1030,6 +1030,22 @@ class LocalEnvironment(BaseEnvironment):
         super().__init__(cwd=_resolve_local_initial_cwd(cwd), timeout=timeout, env=env, persist_env=persistent)
         self.init_session()
 
+    def _project_temp_dir(self) -> Path | None:
+        """Resolve artifact storage from this terminal's assigned, existing checkout."""
+        cwd = getattr(self, "cwd", "")
+        if not cwd or not Path(cwd).is_dir():
+            return None
+        from agent.skill_utils import find_project_root
+        root = find_project_root(Path(cwd))
+        if root is None:
+            return None
+        configured = self.env.get("TERMINAL_TEMP_DIR") or os.environ.get("TERMINAL_TEMP_DIR")
+        candidate = Path(configured).expanduser().resolve() if configured else None
+        target = (candidate if candidate and candidate.is_relative_to(root)
+                  else root / "var" / "hermes-terminal")
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
     def get_temp_dir(self) -> str:
         """Shell-safe writable temp dir. Precedence: ``TERMINAL_TEMP_DIR``, TMPDIR/TMP/TEMP
         (Termux has no system temp dir), ``HERMES_HOME/cache/terminal`` (real storage: a
@@ -1037,6 +1053,9 @@ class LocalEnvironment(BaseEnvironment):
         ``tempfile.gettempdir()``; backend env before process env so terminal.env
         overrides work. Windows: ``%TEMP%`` often has spaces that break unquoted bash,
         so always the HERMES_HOME cache dir with forward slashes (bash- and Python-valid)."""
+        project_dir = self._project_temp_dir()
+        if project_dir is not None:
+            return project_dir.as_posix()
         if _IS_WINDOWS:
             for key in ("TERMINAL_TEMP_DIR", "TMPDIR"):
                 candidate = self.env.get(key) or os.environ.get(key)
@@ -1105,8 +1124,13 @@ class LocalEnvironment(BaseEnvironment):
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
         self._recover_cwd()
+        run_env = _make_run_env(self.env)
+        project_dir = self._project_temp_dir()
+        if project_dir is not None:
+            for key in ("TMPDIR", "TMP", "TEMP"):
+                run_env[key] = str(project_dir)
         proc = subprocess.Popen(
-            args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
+            args, text=True, env=run_env, encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             start_new_session=True, cwd=self.cwd,

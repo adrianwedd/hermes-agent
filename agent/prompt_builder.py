@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from hermes_constants import (
-    get_hermes_home, get_scratch_dir, get_skills_dir, is_wsl, reset_hermes_home_override, set_hermes_home_override,
+    get_hermes_home, get_skills_dir, is_wsl, reset_hermes_home_override, set_hermes_home_override,
 )
 
 from agent.model_metadata import CHARS_PER_TOKEN
@@ -815,7 +815,7 @@ _WINDOWS_BASH_SHELL_HINT = (
     "path conversion is disabled here, so `git -C /c/Users/x` or `node /tmp/a.js` fails with 'cannot change to'/'not "
     "found' even though `cd /c/Users/x` (a bash builtin) works. Pass `C:/Users/x`-style forward-slash native paths to "
     # no-tmp: ok — tells the model what NOT to use
-    "native tools, and prefer `$LOCALAPPDATA/Temp` (or `$TMPDIR`, which Hermes points at its own scratch dir) for scratch files a native tool must read — never a bare `/tmp`. When "
+    "native tools, and use a native Windows path inside the assigned repository for temporary project files a native tool must read — never a bare `/tmp`. When "
     "answering prompts in a pty background process, use process(submit) — never process(write) with a bare trailing "
     "newline: Enter on a Windows PTY is a carriage return, and a lone `\\n"
     "` is not delivered as a line terminator, so the child's prompt silently never returns. When a CLI offers a "
@@ -929,30 +929,14 @@ def _local_host_hints() -> list[str]:
         host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
     except OSError:
         pass
-    # The model reaches for the system temp dir by reflex (tmpfs on most Linux hosts, fills RAM);
-    # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.
-    # State the process's ACTUAL temp dir: export_scratch_tmp_env() deliberately leaves an OS-provided
-    # TMPDIR alone (macOS /var/folders, Windows %TEMP%), so claiming TMPDIR always points at the scratch
-    # dir is false on those hosts and misleads the model about where `tempfile`/`mktemp` write.
-    try:
-        scratch_dir = get_scratch_dir()
-        import tempfile as _tempfile
-        process_tmp = _tempfile.gettempdir()
-        same = os.path.realpath(process_tmp) == os.path.realpath(str(scratch_dir))
-        tmp_note = (
-            "TMPDIR points here"
-            if same
-            else f"TMPDIR is {process_tmp}, NOT this directory, so tempfile/mktemp land there; "
-                 "name this directory explicitly for scratch files"
-        )
-        host_lines.append(
-            f"Scratch directory: {scratch_dir} ({tmp_note}; write temporary files "
-            "and probes there, never under the system temp dir; entries idle for 24h are pruned). "
-            "When a repository is assigned, keep project work and investigation artefacts in a "
-            "gitignored directory INSIDE that repository, and use the scratch directory only as a fallback."
-        )
-    except OSError:
-        pass
+    # Host hints describe placement; building a prompt must not create/prune artifacts.
+    host_lines.append(
+        "Keep project work, temporary scripts, probes, logs and generated outputs inside "
+        "the assigned canonical repository's ignored output tree. Preserve unrelated changes "
+        "and serialize writers. Do not use external scratch as a fallback or create automatic "
+        "worktrees. If no repository is assigned, resolve the operator's local-work repository "
+        "before writing. Retain evidence unless disposal is authorised."
+    )
     if not (sys.platform == "win32" and not is_wsl()):
         return ["\n".join(host_lines)]
     host_lines.append(

@@ -251,34 +251,21 @@ anywhere inside them) are swept hourly by gateway housekeeping and once per proc
 on CLI-only installs. Set `temp_dir` to an existing absolute path to redirect session
 temp anywhere else; user-set paths are never auto-pruned.
 
-Independently of `terminal.temp_dir`, every Hermes process (CLI, TUI, gateway, Desktop
-backend, cron) and every child it launches gets `TMPDIR`, `TMP` and `TEMP` pointed at
-**`~/.hermes/cache/scratch`** (per profile) at startup, so `tempfile.mkdtemp()`,
-`mktemp`, browser profiles and probe scripts all land on real storage instead of a
-RAM-backed system temp dir. The system prompt names this directory as the scratch
-directory. Hermes only sets these when they are not already set — a `TMPDIR` exported
-by you or by the OS (macOS `/var/folders`, Windows `%TEMP%`) is left alone. Entries are
-pruned at startup (at most once per hour) once they have been **idle for 24 hours**: an entry
-stays as long as anything anywhere inside it was written in the last day, and goes a day after
-the last write. Hardlinked files do not count as writes (a `git clone --local` shares pack files
-with its source repo, whose activity would otherwise keep the clone forever). Before an idle entry is deleted, Hermes also stops any process still running
-with its working directory inside that entry (or inside a scratch path that no longer exists,
-such as a headless browser left behind by a test run) and drops any `git worktree`
-registration that pointed into it. A process Hermes itself started and still tracks (a
-background `terminal` process, the gateway, a CLI session, or anything they launched that is
-still their child) is never stopped: an idle entry one of them is working inside is kept
-instead. Each entry is re-checked right before it is deleted, so
-one written to while the prune was stopping processes is kept. Every removal, stopped
-process and kept entry is recorded in `~/.hermes/logs/scratch-prune.log`. An entry holding
-files your user may not read or delete (typically root-owned output of a Docker container that
-wrote into a bind mount) is never deleted partially-blind: it is logged once with the command that
-removes it (`sudo rm -rf '<path>'`, or a `docker run … rm -rf` alternative when Docker is
-installed) and then skipped, not re-scanned every hour, until it is gone, its top directory
-changes, or the directories that refused access become accessible to you (for example after
-`sudo chown -R`); it is also re-checked once a week regardless. Hermes never runs that command
-itself. `hermes doctor`
-reports the directory, its size and any such skipped entries, and
-warns about directories over 1 GB elsewhere under `cache/` that no pruner covers.
+For a local terminal assigned to an existing Git project, session artifacts and child
+`TMPDIR`/`TMP`/`TEMP` stay in that repository: an in-repository `terminal.temp_dir`
+when configured, otherwise `var/hermes-terminal/`. These project paths are retained
+and are not covered by global-cache pruning. Existing background jobs keep their
+recorded paths. Keep temporary scripts, probes and generated outputs in the owning
+repository too; choose the operator's local-work repository before starting a task
+that has no project.
+
+Non-project runtime processes retain their existing temp-variable resolution:
+Hermes supplies `~/.hermes/cache/scratch` only for unset temp variables and respects
+an OS/user-provided value. Resolving this runtime cache does not prune it. Scratch
+pruning remains an explicit operation (`prune_scratch_dir` or `get_scratch_dir(prune=True)`)
+for authorised disposal; its idle checks and process protections remain in place.
+Project artifacts must not be put there as a fallback. `hermes doctor` can report
+cache size without authorising cleanup.
 
 `desktop.font_family` sets the font for chat and the rest of the Hermes Desktop interface (the terminal pane has its own key above). Give it one installed family name (for example, `OpenDyslexic` or `Atkinson Hyperlegible`) or a CSS font stack; Hermes keeps the active theme's own stack behind it so CJK and emoji glyphs still resolve, and an empty value uses the theme's font. Edit it in **Settings → Appearance → Chat Font**.
 

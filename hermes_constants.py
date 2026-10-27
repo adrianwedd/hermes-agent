@@ -813,12 +813,9 @@ def apply_subprocess_home_env(env: MutableMapping[str, str]) -> None:
 # --- Scratch dir: Hermes' own temp space, never the system /tmp ---
 # System temp is tmpfs on most Linux distros and containers, so browser profiles, PTY probes,
 # download spools and every ``tempfile.mkdtemp()`` a Hermes-launched script performs eat RAM
-# and vanish on reboot. ``HERMES_HOME/cache/scratch`` is real storage with an IDLE retention:
-# an entry lives while anything inside it is still being written and goes 24h after the last
-# write anywhere in its subtree. A fixed age was wrong both ways — a directory's own mtime only
-# moves when a direct child is added or removed, so a lane writing deep inside a tree looked
-# untouched and lost its worktree at the deadline, while finished trees (a 7 GB clone with its
-# own venv per campaign lane) sat for three days and filled the disk.
+# and vanish on reboot. Runtime scratch is disk-backed; project work belongs inside
+# its repository. Resolving this cache does not prune it. Explicit authorised pruning
+# uses the idle-time checks below so active descendants keep their recorded paths.
 SCRATCH_TMP_ENV_VARS = ("TMPDIR", "TMP", "TEMP")
 SCRATCH_DIR_MARKER_ENV = "HERMES_SCRATCH_DIR"
 SCRATCH_MAX_IDLE_HOURS = 24
@@ -969,13 +966,14 @@ def apply_secure_dir_policy(path, *, home: str | Path | None = None) -> None:
     _chown_to_hermes_uid(path)
 
 
-def get_scratch_dir(home: str | Path | None = None, *, prune: bool = True) -> Path:
+def get_scratch_dir(home: str | Path | None = None, *, prune: bool = False) -> Path:
     """``<home>/cache/scratch`` (created, owner-only); *home* defaults to the active Hermes home.
 
     Every Hermes process and child gets ``TMPDIR``/``TMP``/``TEMP`` pointed here at boot (see
     :func:`export_scratch_tmp_env`), so ``tempfile`` defaults land here without call sites
-    knowing. Entries idle for ``SCRATCH_MAX_IDLE_HOURS`` are pruned at most once per process
-    and once per hour across processes (stamp file), so a fan-out of children stays cheap.
+    knowing. Resolving a directory never implies disposal authority: pruning is opt-in
+    through ``prune=True`` or ``prune_scratch_dir`` after the operator authorises it.
+    Project artifacts belong in their repository, not in this runtime cache.
 
     Permissions follow :func:`apply_secure_dir_policy`, so an explicit ``HERMES_HOME_MODE`` or
     a managed/shared home is honored instead of a blanket ``0700`` (#117347).
