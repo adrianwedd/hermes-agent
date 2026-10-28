@@ -700,14 +700,18 @@ def _run_quick_snapshots() -> Optional[str]:
     return snapshot_id
 
 
-def _run_full_backup() -> None:
-    """Zip HERMES_HOME under ``backups/`` (restorable via ``hermes import``). Never raises."""
+def _run_full_backup() -> bool:
+    """Zip HERMES_HOME under ``backups/`` (restorable via ``hermes import``). Never raises.
+
+    Returns True only when a zip was written and stat-able, so the unattended gate can refuse
+    instead of treating every failure as a warning (see ``unattended_backup_refusal``).
+    """
     try:
         from hermes_cli.backup import create_pre_update_backup
     except Exception as exc:
         print(f"⚠ Pre-update backup: could not load backup module ({exc}); continuing update.")
         print()
-        return
+        return False
 
     try:
         _keep = _load_updates_cfg().get("backup_keep", 5)
@@ -722,13 +726,13 @@ def _run_full_backup() -> None:
         print(f"  ⚠ Backup failed: {exc}")
         print("  Continuing with update.")
         print()
-        return
+        return False
     elapsed = _time.monotonic() - t0
 
     if out_path is None:
         print("  ⚠ Backup skipped (no files found or write failed); continuing update.")
         print()
-        return
+        return False
 
     try:
         size_bytes = out_path.stat().st_size
@@ -747,6 +751,57 @@ def _run_full_backup() -> None:
     print(f"  Restore:  hermes import {out_path}")
     print("  Disable:  set updates.pre_update_backup: quick (or off) in config.yaml")
     print()
+    return True
+
+
+#: Outcome of the most recent ``_run_pre_update_backup``, read by ``unattended_backup_refusal``.
+#: Kept as module state, not a changed return value, so the documented ``Optional[str]`` contract of
+#: the backup step and every receipt caller stay exactly as they are.
+_LAST_PRE_UPDATE_BACKUP: dict[str, object] = {}
+
+
+def pre_update_backup_outcome() -> dict[str, object]:
+    """Copy of the last backup step's outcome (``mode``, ``snapshot_id``, ``full_saved``, ``detail``)."""
+    return dict(_LAST_PRE_UPDATE_BACKUP)
+
+
+def _note_pre_update_backup(mode, snapshot_id, *, full_saved=None, detail: str = "") -> None:
+    _LAST_PRE_UPDATE_BACKUP.clear()
+    _LAST_PRE_UPDATE_BACKUP.update(
+        mode=mode, snapshot_id=snapshot_id, full_saved=full_saved, detail=detail.strip())
+
+
+def unattended_backup_refusal(args) -> Optional[str]:
+    """Why this unattended (``-y``) run must stop before mutating, or None when it may proceed.
+
+    ``hermes update -y`` is the routine hands-off path, so it may not trade a recovery point for
+    progress. A requested-but-failed backup, and a recovery point switched off by config, are both
+    refusals here: the run stops with a nonzero exit before any code, stash or service is touched,
+    and names the two supported ways forward. Interactive runs keep the documented best-effort
+    behaviour, and ``--no-backup`` is the explicit per-run acceptance of the risk.
+    """
+    if getattr(args, "no_backup", False):
+        return None
+    if not bool(getattr(args, "yes", False)):
+        return None
+    outcome = _LAST_PRE_UPDATE_BACKUP
+    mode = outcome.get("mode")
+    if not mode:
+        return None  # the backup step never ran; do not invent a refusal for it
+    detail = str(outcome.get("detail") or "").strip()
+    if mode == "off":
+        return ("updates.pre_update_backup is off, so an unattended update (-y) would move code with "
+                "no recovery point. Set updates.pre_update_backup: quick (or pass --backup), or pass "
+                "--no-backup to accept that explicitly.")
+    if not outcome.get("snapshot_id"):
+        return ("pre-update snapshot failed" + (f" ({detail})" if detail else "")
+                + ", so an unattended update (-y) has no recovery point. Fix the snapshot, or pass "
+                  "--no-backup to accept that explicitly.")
+    if mode == "full" and outcome.get("full_saved") is False:
+        return ("the pre-update state backup failed or was skipped, so an unattended update (-y) "
+                "would proceed without it. Re-run with --backup once it can be written, or pass "
+                "--no-backup to accept that explicitly.")
+    return None
 
 
 def _run_pre_update_backup(args) -> Optional[str]:
@@ -756,40 +811,47 @@ def _run_pre_update_backup(args) -> Optional[str]:
     ``state-snapshots/``, files over 1 GiB skipped so a bloated state.db can't stall the update.
     ``full`` — quick snapshot PLUS a zip of HERMES_HOME under ``backups/`` (``hermes import``).
 
-    Explicit user opt-out is honored fully. See #34600.
+    Explicit user opt-out is honored fully. See #34600. Every path records its outcome for
+    ``unattended_backup_refusal``, which is what makes a missing recovery point fatal for ``-y``
+    rather than a warning printed just before the code moves.
     """
     mode = _resolve_pre_update_backup_mode(args)
+    _LAST_PRE_UPDATE_BACKUP.clear()  # a previous run in this process must never gate this one
 
     if mode == "off":
         if getattr(args, "no_backup", False):
             print("◆ Pre-update backup: skipped (--no-backup)")
             print()
-        # Config-level off is silent: the user opted out.
+        # Config-level off stays silent for an interactive run: the user opted out. An unattended
+        # run is refused by unattended_backup_refusal() before anything mutates.
+        _note_pre_update_backup("off", None)
         return None
 
     snapshot_id = None
+    snapshot_detail = ""
     try:
         snapshot_id = _run_quick_snapshots()
     except Exception as exc:
         logger.warning("Pre-update snapshot failed: %s", exc)
-        snapshot_detail = f" ({exc})"
-    else:
-        snapshot_detail = ""
+        snapshot_detail = str(exc)
     if not snapshot_id:
-        # Best-effort by design (8ed599dc054: a broken backup never blocks the update), but a
-        # swallowed failure is how a user discovers post-hoc that the receipt says
+        # Best-effort by design (8ed599dc054: a broken backup never blocks an interactive update),
+        # but a swallowed failure is how a user discovers post-hoc that the receipt says
         # ``ok: false`` and nothing was there to restore (#114592). Say it on stdout, once,
         # before any code moves.
-        print(f"  ⚠ Pre-update snapshot FAILED — no recovery point was saved{snapshot_detail}.")
+        print("  ⚠ Pre-update snapshot FAILED — no recovery point was saved"
+              + (f" ({snapshot_detail})" if snapshot_detail else "") + ".")
         print("  Continuing with update (set updates.pre_update_backup: off to silence this).")
         print()
 
     if mode != "full":
         if snapshot_id:
             print()
+        _note_pre_update_backup(mode, snapshot_id, detail=snapshot_detail)
         return snapshot_id
 
-    _run_full_backup()
+    full_saved = _run_full_backup()
+    _note_pre_update_backup(mode, snapshot_id, full_saved=full_saved, detail=snapshot_detail)
     return snapshot_id
 
 

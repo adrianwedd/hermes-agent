@@ -115,6 +115,7 @@ from hermes_cli.update_cmd_maint import (
     _resolve_pre_update_backup_mode, _restore_state_db_from_snapshot,
     _run_post_update_maintenance, _run_pre_update_backup,
     _sweep_bytecode_after_update,
+    unattended_backup_refusal,
     _update_complete_message, _verify_and_restore_one_state_db,
     _verify_and_restore_state_dbs_post_update)
 from datetime import UTC
@@ -1841,6 +1842,18 @@ def _cmd_update_impl(args, gateway_mode: bool):
     _record_pre_update_backup_outcome(args, pre_update_snapshot_id)
     _record_snapshot_stage(args, pre_update_snapshot_id)
 
+    def _refuse_without_recovery_point() -> None:
+        """Stop an unattended run that has no recovery point, before anything mutates.
+
+        Called immediately before the first mutation on each apply path, so a verified no-op
+        (already up to date) still exits 0: a safe no-op is a success, not a refusal.
+        """
+        _backup_blocker = unattended_backup_refusal(args)
+        if _backup_blocker:
+            print(f"✗ {_backup_blocker}")
+            _record_stop("backup_required")
+            sys.exit(1)
+
     _windows_gateway_resume = _pause_gateways_for_update(opts)
     if _windows_gateway_resume:
         import atexit as _atexit
@@ -1866,6 +1879,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
     branch = completion_request["branch"]
 
     if use_zip_update:
+        if not (release_sha and target_is_head):
+            # No recovery point, nothing to do about it now: refuse before the swap.
+            _refuse_without_recovery_point()
         try:
             _update_via_zip(
                 args, had_desktop_app_before_update=had_desktop_app_before_update,
@@ -1957,6 +1973,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
             print("→ Updates available (commit count unknown on this shallow checkout)")
 
         print("→ Pulling updates...")
+        # First mutation of this run: an unattended update without a recovery point stops here,
+        # with the checkout, the tree and every service exactly as they were.
+        _refuse_without_recovery_point()
         movement_baseline = _pull_updates(
             git_cmd, branch, _plan.auto_stash_ref, prompt_for_restore=_plan.prompt_for_restore,
             gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
