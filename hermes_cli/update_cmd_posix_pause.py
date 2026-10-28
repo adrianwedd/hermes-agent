@@ -564,6 +564,32 @@ def pause_at_commit_point() -> str | None:
     return token["posix_pause_verdict"]
 
 
+def active_gateway_work() -> list[dict]:
+    """Gateways reporting in-flight agent turns right now: ``[{profile, home, active, pid}]``.
+
+    The pause stops a gateway after a bounded drain (``_gateway_drain_budget``, 45s floor) and then
+    SIGTERMs it, so a turn that outlasts the budget is interrupted mid-work. Reading the runtime
+    record before anything is stopped is what lets an update refuse instead. Only gateways that say
+    they are running are considered: a stopped record cannot be interrupted.
+    """
+    from gateway.status import read_runtime_status
+    from hermes_cli.update_receipt import _profile_homes
+    busy: list[dict] = []
+    try:
+        homes = list(_profile_homes())
+    except Exception:  # health: allow BLE001 -- unknown homes mean no claimed activity
+        return busy
+    for profile, home in homes:
+        record = read_runtime_status(home / "gateway_state.json")
+        if not isinstance(record, dict) or record.get("gateway_state") != "running":
+            continue
+        active = record.get("active_agents")
+        if isinstance(active, bool) or not isinstance(active, int) or active <= 0:
+            continue
+        busy.append({"profile": profile, "home": str(home), "active": active,
+                     "pid": record.get("pid")})
+    return busy
+
 def _pause(token: dict) -> str | None:
     from hermes_cli import update_pause_record as pause_record
     try:

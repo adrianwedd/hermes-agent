@@ -1866,6 +1866,21 @@ def _cmd_update_impl(args, gateway_mode: bool):
             _record_stop("backup_required")
             sys.exit(1)
 
+    if not getattr(opts, "no_gateway_restart", False):
+        # A gateway in the middle of agent turns is not something an update may stop on a timer:
+        # the pause drains for a bounded 45s and then SIGTERMs, which interrupts live work. Refuse
+        # here, before the checkout or the stash are touched; the same command completes once idle.
+        from hermes_cli.update_cmd_posix_pause import active_gateway_work
+        _busy = active_gateway_work()
+        if _busy:
+            print("✗ An update would stop the gateway while agent turns are still running:")
+            for item in _busy:
+                print(f"    {item['profile']}: {item['active']} active turn(s), pid {item['pid']}")
+            print("  The pause drains for ~45s, then stops the gateway; a longer turn is cut off.")
+            print("  Nothing has been changed. Re-run `hermes update -y` when that work is idle.")
+            _record_stop("active_work")
+            sys.exit(1)
+
     _windows_gateway_resume = _pause_gateways_for_update(opts)
     if _windows_gateway_resume:
         import atexit as _atexit

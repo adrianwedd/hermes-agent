@@ -497,6 +497,7 @@ UPDATE_FAILURE_CLASSES = frozenset({
 # The exit that stopped a run before its apply stage mark, recorded at the exit itself as one of
 # these tokens (update_receipt.record_stop_reason -> the receipt's ``stop_class``).
 UPDATE_STOP_CLASSES = frozenset({
+    "active_work",           # a gateway was mid-turn; an update would have interrupted it
     "backup_required",        # unattended (-y) run refused: no recovery point was saved or enabled
     "branch_missing",         # the target branch exists neither locally nor on origin
     "branch_unsupported",     # --branch on the Windows ZIP fallback
