@@ -112,6 +112,76 @@ def test_untracked_file_is_part_of_the_verified_state(repo: Path):
     assert verified is False
     assert "notes.md" in detail
 
+def test_integrated_restore_preserves_both_sides(repo: Path):
+    """A clean three-way merge is success, not a lost local change.
+
+    Upstream and the user both edit the same file in different places; `git stash apply` merges them.
+    The result matches neither the stashed blob nor HEAD, and byte equality alone would call this a
+    failed restore. What must be demonstrated is that the user's change is still in there.
+    """
+    (repo / "tracked.txt").write_text("base\nlocal\n", encoding="utf-8")
+    stash_ref = _stash(repo)
+    (repo / "tracked.txt").write_text("upstream\nbase\n", encoding="utf-8")
+    _run(repo, "commit", "-qam", "upstream")
+    assert _run(repo, "stash", "apply", stash_ref).returncode == 0
+
+    assert (repo / "tracked.txt").read_text() == "upstream\nbase\nlocal\n"
+    verified, detail = stash_mod._worktree_matches_stash(GIT, repo, stash_ref)
+    assert verified, detail  # exact-restore comparison would have refused here
+
+    assert stash_mod._verify_and_settle_restore(GIT, repo, stash_ref) is True
+    assert _stashes(repo) == ""
+    assert _localwork_refs(repo) == []
+
+
+def test_integration_that_drops_the_local_change_still_fails(repo: Path, monkeypatch):
+    """The integration carve-out must not become a blank cheque: losing the hunk is still a failure."""
+    (repo / "tracked.txt").write_text("base\nlocal\n", encoding="utf-8")
+    stash_ref = _stash(repo)
+    (repo / "tracked.txt").write_text("upstream\nbase\n", encoding="utf-8")
+    _run(repo, "commit", "-qam", "upstream")
+    _run(repo, "stash", "apply", stash_ref)
+    # Apply the upstream content only: the local line is gone, exactly the failure to catch.
+    (repo / "tracked.txt").write_text("upstream\nbase\n", encoding="utf-8")
+
+    verified, detail = stash_mod._worktree_matches_stash(GIT, repo, stash_ref)
+
+    assert verified is False
+    assert "tracked.txt" in detail
+    assert stash_mod._verify_and_settle_restore(GIT, repo, stash_ref) is False
+    assert stash_ref in _stashes(repo)
+
+
+def test_file_mode_change_survives_verification(repo: Path):
+    """The exec bit is part of the saved change, not decoration."""
+    (repo / "tracked.txt").write_text("base\nlocal\n", encoding="utf-8")
+    (repo / "tracked.txt").chmod(0o755)
+    stash_ref = _stash(repo)
+    assert _run(repo, "stash", "apply", stash_ref).returncode == 0
+
+    verified, detail = stash_mod._worktree_matches_stash(GIT, repo, stash_ref)
+    assert verified, detail
+
+    (repo / "tracked.txt").chmod(0o644)  # the mode was dropped
+    verified, detail = stash_mod._worktree_matches_stash(GIT, repo, stash_ref)
+    assert verified is False and "file mode" in detail
+
+
+def test_pin_retains_the_full_stash_object_graph(repo: Path):
+    """The pin must survive `git stash clear`: tracked state, index parent and untracked parent."""
+    _dirty(repo)
+    stash_ref = _stash(repo)
+    pin = stash_mod._pending_autostash_ref
+    assert pin
+
+    assert _run(repo, "stash", "clear").returncode == 0
+    assert _stashes(repo) == ""  # the reflog entry is gone
+
+    assert _run(repo, "rev-parse", pin).stdout.strip() == stash_ref
+    assert _run(repo, "rev-parse", f"{pin}^3").returncode == 0  # untracked parent retained
+    assert _run(repo, "show", f"{pin}^3:notes.md").stdout == "untracked work\n"
+    assert _run(repo, "rev-parse", f"{pin}^2").returncode == 0  # index parent retained
+
 
 # --- unverified restore: keep everything ----------------------------------------------------
 

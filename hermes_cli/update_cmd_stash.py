@@ -5,6 +5,7 @@ Origin helpers are imported lazily per function (no cycle; test patches on the o
 """
 
 import logging
+import os
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone, UTC
@@ -187,6 +188,43 @@ def _drop_local_work_ref(git_cmd: list[str], cwd: Path, ref: Optional[str]) -> N
         _pending_autostash_ref = None
 
 
+def _restore_preserves_local_change(git_cmd: list[str], cwd: Path, stash_ref: str, path: str, target: Path) -> bool:
+    """Does *target* hold this file's local change, integrated onto the updated code?
+
+    A stash applied onto newer code is a three-way merge: git legitimately produces a file that
+    contains both the user's edit and the upstream one, whose bytes match neither the stashed blob
+    nor HEAD. Treating that as a failed restore would refuse updates that worked. So re-derive the
+    merge from the stash's own parents — base ``stash^1``, ours ``stash``, theirs ``HEAD`` — and
+    accept the file only when it is exactly that integration. A dropped hunk still differs.
+    """
+    import tempfile
+    from hermes_cli.update_cmd_git import _git_run
+
+    def blob(spec: str) -> Optional[str]:
+        result = _git_run(git_cmd, ["show", spec], cwd)
+        return result.stdout if result.returncode == 0 else None
+
+    if not target.is_file():
+        return False
+    base, ours, theirs = blob(f"{stash_ref}^1:{path}"), blob(f"{stash_ref}:{path}"), blob(f"HEAD:{path}")
+    if base is None or ours is None or theirs is None:
+        return False
+    try:
+        current = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False  # binary or unreadable: compare bytes only, and bytes already differed
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = []
+        for name, content in (("ours", ours), ("base", base), ("theirs", theirs)):
+            candidate = Path(tmp) / name
+            candidate.write_text(content, encoding="utf-8")
+            paths.append(str(candidate))
+        merged = _git_run(git_cmd, ["merge-file", "-p", *paths], cwd)
+    if merged.returncode != 0:
+        return False  # conflict markers: this is not an integration of the user's change
+    return merged.stdout == current
+
+
 def _worktree_matches_stash(
     git_cmd: list[str], cwd: Path, stash_ref: str,
     preexisting_untracked: set[str] | None = None,
@@ -221,8 +259,16 @@ def _worktree_matches_stash(
         if expected is None:
             return False, f"could not read the stashed copy of {path}"
         actual = sha("hash-object", "--", path) if target.is_file() else None
-        if actual != expected:
-            return False, f"{path} does not match the stashed content"
+        if actual != expected and not _restore_preserves_local_change(
+                git_cmd, cwd, stash_ref, path, target):
+            return False, f"{path} does not hold the stashed change"
+        # The exec bit is part of the change too (scripts, launchers).
+        stashed_mode = sha("ls-tree", stash_ref, "--", path) or ""
+        base_mode = sha("ls-tree", f"{stash_ref}^1", "--", path) or ""
+        if stashed_mode[:6] != base_mode[:6] and target.exists():
+            wants_exec = stashed_mode.startswith("100755")
+            if os.access(target, os.X_OK) != wants_exec:
+                return False, f"{path} lost its file mode"
 
     untracked = _git_run(git_cmd, ["ls-tree", "-r", "--name-only", f"{stash_ref}^3"], cwd)
     if untracked.returncode == 0:
