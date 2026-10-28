@@ -34,6 +34,11 @@ _STASH_LEFT_IN_PLACE = "  The stash was left in place. You can remove it manuall
 #: outcome may claim the update completed (#122557).
 _pending_autostash: Optional[tuple[str, int]] = None
 
+#: Reflog-independent reference to the same saved work (``refs/hermes-localwork/…``).
+#: Created at stash time, dropped only after the restore is verified or the work is explicitly
+#: discarded: a stash entry can be lost to a reflog expiry or a mistaken drop, this cannot.
+_pending_autostash_ref: Optional[str] = None
+
 
 def _git_quiet(git_cmd: list[str], args: list[str], cwd: Path, **kwargs):
     """``subprocess.run`` of a git command with captured output; None when git cannot run."""
@@ -118,6 +123,13 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path, *, checkout_mo
         stash_ref = _push_stash(git_cmd, cwd, stash_name, prev_stash)
     _pending_autostash = (
         stash_ref, len([entry for entry in status.stdout.split("\0") if entry]))
+    # A stash entry alone is not a recovery point: `refs/stash` is a reflog that expires, and dropping
+    # an entry is one mistaken command away. Pin the same commit under a ref that nothing expires.
+    global _pending_autostash_ref
+    _branch = _git_run(git_cmd, ["rev-parse", "--abbrev-ref", "HEAD"], cwd).stdout.strip()
+    _pending_autostash_ref = _create_local_work_ref(git_cmd, cwd, stash_ref, _branch)
+    if _pending_autostash_ref:
+        print(f"→ Saved local work is pinned at {_pending_autostash_ref}")
     return stash_ref
 
 
@@ -148,6 +160,110 @@ def _push_stash(git_cmd: list[str], cwd: Path, stash_name: str, prev_stash: str)
         # pull. Safe to reset: all is in the stash.
         _reset_hard(git_cmd, cwd)
     return stash_ref
+
+
+def _create_local_work_ref(git_cmd: list[str], cwd: Path, stash_ref: str, branch: str) -> Optional[str]:
+    """Pin *stash_ref* under ``refs/hermes-localwork/…``; the refname, or None.
+
+    Nothing expires this ref (the orphan/divergence rescue refs under the same namespace do, by
+    design), so it survives a reflog expiry, a ``git stash clear`` and a drop by index. It is
+    removed only when the work is back in the tree and verified, or deliberately discarded.
+    """
+    from hermes_cli.update_cmd_git import _git_run
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    safe_branch = re.sub(r"[^A-Za-z0-9._-]+", "-", branch or "detached")
+    ref = f"refs/hermes-localwork/{safe_branch}-{stamp}-{stash_ref[:12]}"
+    created = _git_run(git_cmd, ["update-ref", ref, stash_ref], cwd)
+    return ref if created.returncode == 0 else None
+
+
+def _drop_local_work_ref(git_cmd: list[str], cwd: Path, ref: Optional[str]) -> None:
+    """Retire a ``localwork`` pin. Only ever after the work is verified back in the tree."""
+    global _pending_autostash_ref
+    from hermes_cli.update_cmd_git import _git_run
+    if ref:
+        _git_run(git_cmd, ["update-ref", "-d", ref], cwd)
+    if ref and ref == _pending_autostash_ref:
+        _pending_autostash_ref = None
+
+
+def _worktree_matches_stash(
+    git_cmd: list[str], cwd: Path, stash_ref: str,
+    preexisting_untracked: set[str] | None = None,
+) -> tuple[bool, str]:
+    """Is the saved work actually back in the tree? ``(ok, first-mismatch detail)``.
+
+    Compares content, not git's exit code: every tracked path the stash changed must hold the
+    stashed bytes again (a deletion must still be absent), and every stashed untracked path must be
+    present with the stashed bytes. A merge that reapplied the patch onto different code can still
+    exit 0 while silently dropping a hunk; this is what catches that.
+    """
+    from hermes_cli.update_cmd_git import _git_run
+
+    def sha(*args: str) -> Optional[str]:
+        result = _git_run(git_cmd, list(args), cwd)
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    changed = _git_run(git_cmd, ["diff", "--name-status", f"{stash_ref}^1", stash_ref], cwd)
+    if changed.returncode != 0:
+        return False, "could not read the stashed change set"
+    for line in changed.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status, path = parts[0][:1], parts[-1]
+        target = cwd / path
+        if status == "D":
+            if target.exists():
+                return False, f"{path} should still be deleted"
+            continue
+        expected = sha("rev-parse", f"{stash_ref}:{path}")
+        if expected is None:
+            return False, f"could not read the stashed copy of {path}"
+        actual = sha("hash-object", "--", path) if target.is_file() else None
+        if actual != expected:
+            return False, f"{path} does not match the stashed content"
+
+    untracked = _git_run(git_cmd, ["ls-tree", "-r", "--name-only", f"{stash_ref}^3"], cwd)
+    if untracked.returncode == 0:
+        for path in untracked.stdout.splitlines():
+            if not path.strip() or path in (preexisting_untracked or ()):
+                continue
+            target = cwd / path
+            expected = sha("rev-parse", f"{stash_ref}^3:{path}")
+            actual = sha("hash-object", "--", path) if target.is_file() else None
+            if actual is None:
+                return False, f"stashed untracked file {path} is missing"
+            if expected is not None and actual != expected:
+                return False, f"stashed untracked file {path} differs"
+    return True, ""
+
+
+def _verify_and_settle_restore(
+    git_cmd: list[str], cwd: Path, stash_ref: str,
+    preexisting_untracked: set[str] | None = None,
+) -> bool:
+    """Drop the stash only once the tree provably holds the saved work again.
+
+    Returns True when the restore is verified and the stash and its ``localwork`` pin are retired.
+    On any mismatch the stash, its pin and this run's unsettled verdict all stay: the caller must
+    not report success while the user's work is somewhere other than the tree.
+    """
+    verified, detail = _worktree_matches_stash(git_cmd, cwd, stash_ref, preexisting_untracked)
+    if not verified:
+        print("✗ Local changes were applied, but the restored tree does not match what was stashed.")
+        print(f"  {detail}")
+        print("  The stash was NOT dropped, and the saved work stays pinned:")
+        print(f"  Stash ref:  {stash_ref}")
+        if _pending_autostash_ref:
+            print(f"  Durable ref: {_pending_autostash_ref}")
+            print(f"  Recover with: git stash show -p {_pending_autostash_ref} | git apply --3way")
+        _record_stash_disposition("parked", stash_ref, f"restore could not be verified: {detail}")
+        return False
+    _drop_restored_stash(git_cmd, cwd, stash_ref)
+    _drop_local_work_ref(git_cmd, cwd, _pending_autostash_ref)
+    _record_stash_disposition("restored", stash_ref)
+    return True
 
 
 def _resolve_stash_selector(git_cmd: list[str], cwd: Path, stash_ref: str) -> Optional[str]:
@@ -476,6 +592,8 @@ def _apply_stash(git_cmd: list[str], cwd: Path, stash_ref: str, checkout_move=No
             print(f"  • {f}")
     print("\nYour stashed changes are preserved — nothing is lost.")
     print(f"  Stash ref: {stash_ref}")
+    if _pending_autostash_ref:
+        print(f"  Durable ref: {_pending_autostash_ref} (nothing expires this one)")
     print("Working tree reset to clean state.")
     print(f"Restore your changes later with: git stash apply {stash_ref}")
     _record_stash_disposition("parked", stash_ref, "restore hit conflicts")
@@ -560,10 +678,12 @@ def _restore_stashed_changes(
         print("  The updated files are in place; your versions are kept in the stash, which was NOT dropped.")
         print(f"  Stash ref: {stash_ref}")
         print(f"  Recover a file with: git show {stash_ref}^3:<path> > <path>.mine")
+        if _pending_autostash_ref:
+            print(f"  Durable ref: {_pending_autostash_ref} (nothing expires this one)")
         _record_stash_disposition("parked", stash_ref, f"untracked files replaced by the update: {', '.join(replaced[:10])}")
         return False
-    _drop_restored_stash(git_cmd, cwd, stash_ref)
-    _record_stash_disposition("restored", stash_ref)
+    if not _verify_and_settle_restore(git_cmd, cwd, stash_ref, preexisting_untracked):
+        return False
     print("⚠ Local changes were restored on top of the updated codebase.")
     print("  Review `git diff` / `git status` if Hermes behaves unexpectedly.")
     return True
@@ -592,5 +712,6 @@ def _discard_stashed_changes(git_cmd: list[str], cwd: Path, stash_ref: str) -> b
         _record_stash_disposition("parked", stash_ref, "configured discard failed")
         return False
     print("→ Discarded local source changes (updates.non_interactive_local_changes=discard).")
+    _drop_local_work_ref(git_cmd, cwd, _pending_autostash_ref)
     _record_stash_disposition("discarded", stash_ref)
     return True
