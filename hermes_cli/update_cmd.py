@@ -1355,6 +1355,18 @@ def _apply_parked_branch_guard(
     switch_safe, switch_block_reason = _m()._assess_parked_branch_switch(
         git_cmd, _m().PROJECT_ROOT, current_branch, branch)
     if not switch_safe:
+        # update_in_place never moves the checkout: it merges the target into the branch that is
+        # already checked out, so a dirty tree does not ride an autostash across branches. The
+        # autostash taken below protects it and is restored, verified, on this same branch — which
+        # is the documented purpose of this strategy for long-lived feature branches. Refusing here
+        # made `hermes update -y` permanently skip every dirty custom branch (#parked-dirty).
+        _in_place_dirty = (
+            switch_block_reason == "dirty" and not switch_branch
+            and _updates_config().get("parked_branch_strategy", "switch") == "update_in_place")
+        if _in_place_dirty:
+            print("  ℹ Uncommitted changes on this branch: updating in place (no branch switch) —"
+                  " they are stashed and restored here.")
+            return False, True, switch_block_reason
         _m()._print_parked_branch_skip_warning(
             git_cmd, _m().PROJECT_ROOT, current_branch, branch, switch_block_reason)
         print()
