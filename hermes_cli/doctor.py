@@ -20,8 +20,9 @@ _env_path = get_env_path()
 load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
 
 from hermes_cli.colors import Colors, color
-from hermes_cli.doctor_report import Finding, _section, check_bool, check_info, doctor_check, warn_on_error
+from hermes_cli.doctor_report import finding_scope, check_unavailable, Finding, _section, check_bool, check_info, doctor_check, warn_on_error
 from hermes_cli.doctor_connectivity import _has_healthy_oauth_fallback_for_apikey_provider, build_probes, run_probes
+from hermes_cli.doctor_dependencies import _check_python_dependencies
 from hermes_cli.doctor_tools import _safe_which
 
 from hermes_cli.doctor_config import (
@@ -87,7 +88,12 @@ def _check_auth_providers(should_fix: bool, f: Finding) -> None:
 
 def _login_row(label: str, status: dict, ok_detail: str = "(logged in)", show_error: bool = False) -> bool:
     """ok/warn row for an OAuth status dict; with show_error, its ``error`` hint prints under a not-logged-in row."""
-    logged_in = check_bool(status.get("logged_in"), (label, ok_detail), (label, "(not logged in)"))
+    logged_in = bool(status.get("logged_in"))
+    if logged_in:
+        from hermes_cli.doctor_report import check_ok
+        check_ok(label, ok_detail)
+    else:
+        check_unavailable(label, "(optional provider, not logged in)")
     if not logged_in and show_error and status.get("error"):
         check_info(status["error"])
     return logged_in
@@ -113,6 +119,7 @@ DOCTOR_CHECKS = (
     ('Security Advisories', _check_security_advisories), ('MCP Server Security', _check_mcp_security),
     ('Python Environment', _check_python_environment), ('SSL / CA Certificates', _check_certificates),
     ('Required Packages', _check_required_packages), (None, _check_web_dashboard_import),
+    ('Python Dependency Audit', _check_python_dependencies),
     ('Configuration Files', _check_env_file),
     (None, _check_config_file), (None, _check_config_drift),
     ('xAI Model Retirement (May 15, 2026)', _check_xai_retirement),
@@ -147,25 +154,28 @@ def _ack_advisory(ack_target: str) -> None:
 
 def _print_summary(should_fix: bool, total: Finding) -> None:
     print()
-    remaining = total.issues + total.manual_issues
-    numbered = "".join(f"  {i}. {issue}\n" for i, issue in enumerate(remaining, 1))
-    if should_fix and total.fixed > 0:
-        print(color("─" * 60, Colors.GREEN))
-        print(color(f"  Fixed {total.fixed} issue(s).", Colors.GREEN, Colors.BOLD), end="")
-        print(color(f" {len(remaining)} issue(s) require manual intervention.", Colors.YELLOW, Colors.BOLD) if remaining else "")
-        print()
-        if remaining:
-            print(numbered)
-    elif remaining:
-        print(color("─" * 60, Colors.YELLOW))
-        print(color(f"  Found {len(remaining)} issue(s) to address:", Colors.YELLOW, Colors.BOLD))
-        print()
-        print(numbered)
-        if not should_fix and total.issues:
-            print(color("  Tip: run 'hermes doctor --fix' to auto-fix what's possible.", Colors.DIM))
-    else:
-        print(color("─" * 60, Colors.GREEN))
-        print(color("  All checks passed! 🎉", Colors.GREEN, Colors.BOLD))
+    errors = total.issues + total.manual_issues
+    degraded = bool(errors or total.security or total.warnings)
+    state = "degraded" if degraded else "unverified" if total.unverified else "healthy"
+    print(color("─" * 60, Colors.YELLOW if degraded or total.unverified else Colors.GREEN))
+    print(f"  Health: {state}; {len(errors)} error(s), {len(total.security)} security finding(s), "
+          f"{len(total.warnings)} operational warning(s), {len(total.unavailable)} unavailable capability(s), "
+          f"{len(total.unverified)} unverified check(s).")
+    if should_fix and total.fixed:
+        print(f"  Fixed {total.fixed} issue(s); remaining findings follow.")
+    for label, entries in (("Errors", errors), ("Security vulnerabilities", total.security),
+                           ("Operational warnings", total.warnings),
+                           ("Unavailable capabilities (optional)", total.unavailable),
+                           ("Unverified checks", total.unverified)):
+        if entries:
+            print(f"\n  {label}:")
+            for entry in dict.fromkeys(entries):
+                print(f"    • {entry}")
+    if not degraded and not total.unverified:
+        print("  All checks passed for the checks completed; optional unavailable capabilities are listed above.")
+    if not should_fix and total.issues:
+        print("\n  Review each remedy before using 'hermes doctor --fix': it can modify configuration or databases. "
+              "Back up affected data and arrange an idle window for offline repairs.")
     print()
 
 
@@ -182,13 +192,15 @@ def run_doctor(args):
                  "└─────────────────────────────────────────────────────────┘"):
         print(color(line, Colors.CYAN))
     total = Finding()
-    for title, check in DOCTOR_CHECKS:
-        if title:
-            _section(title)
-        total.merge(check(should_fix))
-    # Opt-in live probes run AFTER all static checks (`--live`: real network calls; bounded + read-only).
-    with warn_on_error(""):
-        from hermes_cli.doctor_live import maybe_run_live_checks
-        maybe_run_live_checks(args, total.manual_issues)
+    with finding_scope(total):
+        for title, check in DOCTOR_CHECKS:
+            if title:
+                _section(title)
+            with warn_on_error(f"{title or check.__name__} could not complete", "{e}"):
+                total.merge(check(should_fix))
+        # Live probes use the same status collection as static checks.
+        with warn_on_error("Live probes could not complete", "{e}"):
+            from hermes_cli.doctor_live import maybe_run_live_checks
+            maybe_run_live_checks(args, total.manual_issues)
     _print_summary(should_fix, total)
-    return int(bool(total.issues or total.manual_issues))
+    return 1 if total.issues or total.manual_issues or total.security else 2 if total.unverified else 0

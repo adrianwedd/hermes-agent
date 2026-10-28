@@ -983,9 +983,15 @@ hermes doctor [--fix]
 
 | Option | Description |
 |--------|-------------|
-| `--fix` | Attempt automatic repairs where possible. |
+| `--fix` | Attempt repairs; may modify configuration or databases. Review findings and back up first. |
 
-Exit status: `0` when the report lists no unresolved problems, `1` when at least one remains (including problems `--fix` could not repair), so a health gate or CI step can trust `hermes doctor` as a check.
+The summary separates errors, security vulnerabilities, operational warnings, optional unavailable capabilities, and unverified checks. Optional providers without credentials do not fail general health. Storage thresholds are advisory and do not establish that retained data can be deleted.
+
+Exit status: `1` when errors or security findings remain; `2` when there are no known errors/security findings but some checks could not be completed; `0` otherwise. A `0` can still carry operational warnings and a **degraded** health summary, so inspect the report when using doctor as an operational health gate.
+
+Python dependencies are checked against OSV for the command's environment, readable PM environments leased by the live host gateway, and available source lock; npm audits report the selected dependency scopes, including build/test dependencies where npm includes them. Network failures and malformed audit reports are **unverified**, never an all-clear. This does not prove that an already-running gateway has loaded newly staged dependencies.
+
+`--fix` may modify configuration or databases. Review each remedy, back up affected data, and arrange an idle window before offline database repair. A skipped write-health probe on a large live database is unverified; validate a consistent backup separately instead of using `--fix` as a read-only probe.
 
 The **API Connectivity** section includes an `IPv6 route` check: it opens one short (2 s) IPv6 TCP connection to a known dual-stack host. A route that is advertised but only times out (a blackholed IPv6 prefix) is reported as a warning naming the remedy, `network.force_ipv4: true`. Having no IPv6 route at all is healthy and reported as OK; the check is skipped when `force_ipv4` is already set.
 

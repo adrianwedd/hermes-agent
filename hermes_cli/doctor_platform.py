@@ -13,7 +13,7 @@ from hermes_cli.colors import Colors, color
 from hermes_cli.config import is_nix_install_method, recommended_update_command_for_method
 from hermes_cli.doctor_report import (
     Finding, _fail_and_issue, _section, check_bool, check_fail, check_info, check_ok, check_warn, doctor_check,
-    warn_on_error,
+    warn_on_error, check_unavailable, check_unverified,
 )
 from hermes_constants import is_termux as _is_termux
 
@@ -139,6 +139,12 @@ def _report_database_journal_modes(hermes_home: Path | None = None, version_info
         if not path.is_file():
             continue
         mode, error = _read_journal_mode(path)
+        if name == "kanban/boards/default/kanban.db" and error == "file is empty":
+            # The default board uses <root>/kanban.db, not the board metadata directory.
+            canonical = path.parents[3] / "kanban.db"
+            if canonical.is_file() and _read_journal_mode(canonical)[1] is None:
+                check_info(f"{name}: unused empty placeholder; default board uses kanban.db (left untouched)")
+                continue
         size = _format_db_size(path)
         if error is None and mode == "wal" and configured == "delete":
             # The operator configured `delete` because WAL is unsafe on their filesystem, but the runtime never
@@ -158,7 +164,7 @@ def _report_database_journal_modes(hermes_home: Path | None = None, version_info
             if vulnerable:
                 check_warn(f"{name}: journal mode could not be read", f"({error}; cannot rule out WAL exposure)")
             else:
-                check_info(f"{name}: journal mode could not be read ({error})")
+                check_unverified(f"{name}: journal mode could not be read", f"({error})")
         elif mode == "wal" and _path_on_cross_vm_fs(str(path)):
             # #110848: WAL shared-memory is not coherent across a virtiofs/9p bind mount; startup only refuses WAL
             # for FRESH databases, so an existing WAL file here keeps corrupting until the operator converts it.
@@ -494,7 +500,7 @@ def _check_required_packages(should_fix: bool, f: Finding) -> None:
             check_ok(name, "(optional)" if optional else "")
         except ImportError:
             if optional:
-                check_warn(name, "(optional, not installed)")
+                check_unavailable(name, "(optional, not installed)")
             else:
                 _fail_and_issue(name, "(missing)", f"Repair {name}: {_python_repair_hint()}", f.issues)
 

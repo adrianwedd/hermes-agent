@@ -11,7 +11,7 @@ def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
         "doctor", help="Check configuration and dependencies",
         description="Diagnose issues with Hermes Agent setup")
     doctor_parser.add_argument(
-        "--fix", action="store_true", help="Attempt to fix issues automatically")
+        "--fix", action="store_true", help="Attempt repairs (may modify configuration or databases; review findings and back up first)")
     doctor_parser.add_argument(
         "--live", action="store_true",
         help="Opt-in: run one bounded, read-only real-call health probe per "

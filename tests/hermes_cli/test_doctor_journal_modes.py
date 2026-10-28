@@ -443,6 +443,12 @@ class TestConfiguredDeleteNeverApplied:
         try:
             marker, sqlite_pid = holder.stdout.readline().strip().split(":", 1)
             assert marker == "held"  # child-reported: Popen.pid is the venv launcher on Windows
+            import psutil
+            def holder_processes(attrs):
+                process = psutil.Process(int(sqlite_pid))
+                process.info = process.as_dict(attrs=attrs)
+                return iter([process])
+            monkeypatch.setattr(psutil, "process_iter", holder_processes)
             doctor_platform._report_database_journal_modes(tmp_path, (3, 51, 3))
         finally:
             holder.stdin.write("\n")

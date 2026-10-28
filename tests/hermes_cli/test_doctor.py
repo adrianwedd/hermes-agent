@@ -160,7 +160,8 @@ class TestDoctorToolAvailabilitySummary:
         image_line = next(line for line in out.splitlines() if "image_gen" in line)
         assert "hermes tools" in image_line and "system dependency" not in image_line and "unavailable" in image_line
         assert "system dependency not met" in next(line for line in out.splitlines() if "homeassistant" in line)
-        assert any("hermes setup" in issue for issue in f.issues)
+        assert not f.issues
+        assert any("image_gen" in item for item in f.unavailable)
 
     def test_web_capability_rows_warn_when_selected_provider_not_ready(self, monkeypatch):
         """#78412: selected firecrawl with is_available=False must warn."""
@@ -1664,3 +1665,11 @@ def test_profile_alias_status_follows_the_wrapper_the_profile_really_has(monkeyp
     assert "no alias" in status["ops"]  # a foreign ops.bat is not ops's alias
     old = next(p for p in profiles.list_profiles() if p.name == "old")
     assert old.alias_path == tmp_path / ".local" / "bin" / "old"  # never the foreign old.bat (uninstall unlinks it)
+
+
+
+@pytest.fixture(autouse=True)
+def _no_osv_network_in_configuration_tests(monkeypatch):
+    monkeypatch.setattr(doctor, "DOCTOR_CHECKS", tuple(
+        (title, check) for title, check in doctor.DOCTOR_CHECKS if title != "Python Dependency Audit"
+    ))

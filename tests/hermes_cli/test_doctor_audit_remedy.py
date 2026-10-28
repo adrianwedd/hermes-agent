@@ -10,6 +10,7 @@ lockfile bump; the doctor must never prescribe a local mutating fix command, and
 the shipped root lockfile must audit clean so the finding never appears at all.
 """
 
+import pytest
 import json
 import subprocess
 from unittest.mock import patch
@@ -44,11 +45,12 @@ def test_root_remedy_never_prescribes_local_audit_fix(capsys):
     out, issues = _run_audit_one(capsys, ["--workspaces=false"], _audit_json(high=1, moderate=1))
     assert "run: cd" not in out
     assert "npm audit fix" not in out
-    assert "lockfile bump" in out
-    assert issues == [
-        "Browser tools (agent-browser) has 2 npm vulnerabilities; wait for an upstream lockfile fix, then update "
-        "your installation (Docker: pull a rebuilt image; recreating the same image restores the same dependencies)"
-    ]
+    assert "lockfile bump" in issues[0]
+    assert len(issues) == 1
+    assert "verify patched releases" in issues[0]
+    assert "has not been verified" in issues[0]
+    assert "wait for" not in issues[0]
+
 
 
 def test_npm_audit_only_finding_does_not_offer_doctor_fix(capsys):

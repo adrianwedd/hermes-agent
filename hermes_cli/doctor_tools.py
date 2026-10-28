@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 from hermes_cli.doctor_platform import _system_package_install_cmd
-from hermes_cli.doctor_report import Finding, _fail_and_issue, check_bool, check_info, check_ok, check_warn, doctor_check
+from hermes_cli.doctor_report import check_unavailable, check_unverified, Finding, _fail_and_issue, check_bool, check_info, check_ok, check_warn, doctor_check
 from hermes_cli.vercel_auth import describe_vercel_auth
 from hermes_constants import is_termux as _is_termux
 from tools.environments.docker import docker_runtime_name, docker_runtime_start_hint, find_docker
@@ -415,47 +415,39 @@ def _plural(n: int) -> str:
 
 
 def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], manual_issues: list[str]) -> None:
-    """Run one `npm audit --json` and report; any failure is silently skipped.
-
-    Every row here audits a tree whose versions come from a COMMITTED lockfile
-    (`npm ci` in `_run_npm_install_deterministic` reifies exactly that state on
-    every `hermes update`), so a local `npm audit fix` never persists — the next
-    update's deterministic install restores the pinned (vulnerable) versions and
-    the finding reappears. The durable remedy in every case is a lockfile bump
-    on main (update `package-lock.json` and ship it); the doctor therefore never
-    prescribes a local mutating fix command. See #116774.
-    """
+    """Audit a committed dependency tree; failed or malformed audits are unverified."""
     import json
     from hermes_constants import with_hermes_node_path
     try:
-        # Resolved absolute path so Windows can execute npm.cmd (CreateProcessW can't run bare .cmd names).
-        audit_result = subprocess.run([npm_bin, "audit", "--json", *audit_extra], cwd=str(npm_dir),
-                                      capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30,
-                                      env=with_hermes_node_path(), check=False)
-        audit_data = json.loads(audit_result.stdout) if audit_result.stdout.strip() else {}
-        counts = audit_data.get("metadata", {}).get("vulnerabilities", {})
-        critical, high, moderate = (counts.get(k, 0) for k in ("critical", "high", "moderate"))
-        total = critical + high + moderate
-        workspace_scoped = bool(audit_extra) and audit_extra[0] == "--workspace"
-        if total == 0:
-            check_ok(f"{label} deps", "(no known vulnerabilities)")
-        elif critical > 0 or high > 0:
-            remedy = ("fix is an upstream lockfile bump — a local manual fix does not persist"
-                      " (the next `hermes update` reinstalls from the committed lockfile)")
-            check_warn(f"{label} deps", f"({critical} critical, {high} high, {moderate} moderate — {remedy})")
-            if workspace_scoped:
-                check_info("  ^ workspace audit includes runtime and build dependencies; if manual npm remediation "
-                           "errors with an arborist crash it's a known npm bug — clears via a lockfile bump")
-            else:
-                check_info("  ^ runtime dependency tree; report/pin the fix in package-lock.json — see #116774")
-            manual_issues.append(
-                f"{label} has {total} npm {_plural(total)}; wait for an upstream lockfile fix, then update "
-                "your installation (Docker: pull a rebuilt image; recreating the same image restores the same dependencies)"
-            )
-        else:
-            check_ok(f"{label} deps", f"({moderate} moderate {_plural(moderate)})")
-    except Exception:
-        pass
+        result = subprocess.run([npm_bin, "audit", "--json", *audit_extra], cwd=str(npm_dir),
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+                                env=with_hermes_node_path(), check=False)
+        data = json.loads(result.stdout)
+        counts = data.get("metadata", {}).get("vulnerabilities")
+        if result.returncode not in (0, 1) or data.get("error") or not isinstance(counts, dict):
+            raise ValueError(f"npm audit did not return a vulnerability report (exit {result.returncode})")
+        levels = ("critical", "high", "moderate", "low", "info")
+        if any(type(counts.get(k)) is not int or counts[k] < 0 for k in levels):
+            raise ValueError("npm audit returned invalid severity counts")
+        total = sum(counts[k] for k in levels)
+        if not total:
+            check_ok(f"{label} deps", "(no known vulnerabilities in the audited scope)")
+            return
+        detail = ", ".join(f"{counts[k]} {k}" for k in levels if counts[k])
+        from hermes_cli.doctor_report import check_fail
+        check_fail(f"{label} deps", f"({detail})")
+        for name, item in data.get("vulnerabilities", {}).items():
+            check_info(f"{name}: {item.get('severity', 'unknown')} — affected {item.get('range', 'unknown')}; "
+                       f"reported fix availability: {item.get('fixAvailable', 'unknown')}")
+        check_info("Scope includes the dependencies selected by npm, which may include build/test dependencies; "
+                   "a package advisory alone does not prove application exploitability.")
+        manual_issues.append(
+            f"{label} has {total} npm {_plural(total)} ({detail}); verify patched releases and update the "
+            "source manifests and committed lockfile (lockfile bump), then install from that reviewed lock. "
+            "A shipped Hermes fix has not been verified; local installation edits alone do not persist."
+        )
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
+        check_unverified(f"{label} dependency audit", str(exc))
 
 
 @doctor_check()
@@ -493,7 +485,11 @@ def _check_npm_audit(should_fix: bool, f: Finding) -> None:
         ):
             # Workspace-scoped audits check the root node_modules; standalone dirs check their own.
             if ((PROJECT_ROOT if audit_extra else npm_dir) / "node_modules").exists():
-                _audit_one(npm_bin, npm_dir, label, audit_extra, f.manual_issues)
+                _audit_one(npm_bin, npm_dir, label, audit_extra, f.security)
+            else:
+                check_unavailable(f"{label} dependency audit", "(dependency tree not installed)")
+    if not npm_bin:
+        check_unverified("npm dependency audits", "(PM npm executable unavailable)")
     if _is_termux():
         check_info("Termux compatibility fallbacks:")
         for note in _TERMUX_INSTALL_ALL_FALLBACK_NOTES:
@@ -522,9 +518,11 @@ def _check_tool_availability(should_fix: bool, f: Finding) -> None:
     for item in unavailable:
         env_vars = item.get("missing_vars") or item.get("env_vars") or []
         detail = f"(missing {', '.join(env_vars)})" if env_vars else _TOOLSET_SETUP_HINTS.get(item["name"], "(system dependency not met)")
-        check_warn(item["name"], detail)
+        check_unavailable(item["name"], detail)
     # Only toolsets enabled for the CLI count toward the summary; default-off or
     # disabled toolsets may warn above but must not pollute it.
     api_disabled = _missing_api_key_toolsets_for_summary(unavailable)
-    if api_disabled or any(status != "ok" for status, _, _ in web_rows):
-        f.issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
+    if api_disabled:
+        check_info("Optional tool setup: use 'hermes tools' to select and configure the capabilities you need.")
+    if any(status != "ok" for status, _, _ in web_rows):
+        f.manual_issues.append("Selected web backend is unavailable; check its provider configuration with 'hermes tools'")

@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from hermes_cli.doctor_report import (
     Finding, _fail_and_issue, _section, check_bool, check_info, check_ok, check_warn, doctor_check, ensure_dir,
-    warn_on_error,
+    warn_on_error, check_unverified,
 )
 from hermes_cli.sizefmt import format_bytes as _human_bytes
 from hermes_state_holders import read_only_db_uri
@@ -302,8 +302,8 @@ def _write_health_reason(state_db_path: Path, *, should_fix: bool):
     if not _live_writer_holds_db(state_db_path):
         return _db_opens_cleanly(state_db_path)
     if not should_fix and state_db_path.stat().st_size > _WRITE_PROBE_SNAPSHOT_MAX_BYTES:
-        check_info("state.db write-health probe skipped: store is held by a live writer and larger than 1 GB "
-                   "(run 'hermes doctor --fix' to probe it)")
+        check_unverified("state.db write-health probe skipped", "(live writer and store larger than 1 GiB; "
+                         "validate a consistent backup separately; --fix may attempt repairs and is not a read-only probe)")
         return None
     import sqlite3
     import tempfile
@@ -384,7 +384,8 @@ def _classify_unreadable_state_db(f: Finding, should_fix: bool, state_db_path: P
     if _report_structural_damage(f, should_fix, state_db_path, _DHH, exc):
         return
     if not is_malformed_db_error(exc):
-        return check_warn(f"{_DHH}/state.db exists but has issues: {exc}")
+        return _fail_and_issue(f"{_DHH}/state.db cannot be read", str(exc),
+                               "Investigate state.db read failure before attempting repair: " + str(exc), f.manual_issues)
     # sqlite_master itself is malformed (e.g. duplicate messages_fts): every statement fails before it runs,
     # so this is NOT a plain FTS rebuild — repair sqlite_master in place (backup first).
     check_warn(f"{_DHH}/state.db schema is malformed (sessions hidden until repaired)", f"({exc})")
@@ -418,9 +419,7 @@ def _state_db_stats(issues: list, state_db_path: Path) -> None:
                 check_info(_text + (f" {_detail}" if _detail else ""))
                 continue
             check_warn(_text, _detail)
-            if "auto_prune" in _detail:
-                issues.append("state.db is large — review retention; sessions.auto_prune requires explicit authorisation"
-                              + (" and run 'hermes sessions optimize-storage' offline (gateway stopped)" if "optimize-storage" in _detail else ""))
+
 
 
 def _state_db_wal(f: Finding, should_fix: bool, state_db_path: Path) -> None:
@@ -492,7 +491,7 @@ def _check_state_db(should_fix: bool, f: Finding) -> None:
         return
     if state_db_path.exists():
         _state_db_health(f, should_fix, state_db_path, _DHH)
-        _state_db_stats(f.issues, state_db_path)
+        _state_db_stats(f.warnings, state_db_path)
     else:
         check_info(f"{_DHH}/state.db not created yet (will be created on first session)")
     _state_db_wal(f, should_fix, state_db_path)
@@ -665,8 +664,13 @@ def _check_profiles(should_fix: bool, f: Finding) -> None:
         for wrapper in wrapper_dir.iterdir():
             if not wrapper.is_file():
                 continue
-            with warn_on_error(""):
-                _m = _re.search(r"hermes -p (\S+)", wrapper.read_text(encoding="utf-8-sig"))
+            with warn_on_error(f"Profile alias inspection: {wrapper}"):
+                with wrapper.open("rb") as handle:
+                    prefix = handle.read(2)
+                    if prefix != b"#!" and wrapper.suffix.lower() != ".bat":
+                        continue  # The user's bin directory also contains native executables.
+                    content = (prefix + handle.read()).decode("utf-8-sig")
+                _m = _re.search(r"hermes -p (\S+)", content)
                 if _m and not profile_exists(_m.group(1)):
                     alias = wrapper.stem if _wrapper_path(wrapper.stem) == wrapper else wrapper.name
                     fix = f"hermes profile alias {alias} --remove" if PROFILE_ID_RE.match(alias) else f"delete {wrapper}"

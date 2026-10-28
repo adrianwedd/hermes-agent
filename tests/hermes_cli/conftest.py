@@ -178,3 +178,18 @@ def probe_root(tmp_path):
     """
     (tmp_path / "hermes_bootstrap.py").write_text("", encoding="utf-8")
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_doctor_checkout_pm(request, monkeypatch, tmp_path):
+    """Doctor tests of a checkout inside Hermes home must not read installation state."""
+    if not request.node.path.name.startswith("test_doctor"):
+        return
+    from pathlib import Path
+    from pm import environments, paths
+    root = Path(__file__).resolve().parents[2]
+    original = environments._payload_manifest
+    monkeypatch.setattr(environments, "_payload_manifest",
+                        lambda candidate: None if candidate == root else original(candidate))
+    monkeypatch.setattr(paths, "runtime_facts_path", lambda: tmp_path / "facts.json")
+    monkeypatch.setattr("hermes_constants.with_hermes_node_path", lambda env=None: dict(env or {}))

@@ -3,17 +3,51 @@
 from __future__ import annotations
 
 import functools
+import logging
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from hermes_cli.colors import Colors, color
 
 
+_current_finding: ContextVar = ContextVar("doctor_finding", default=None)
+
+
+@contextmanager
+def finding_scope(finding):
+    token = _current_finding.set(finding)
+    try:
+        yield
+    finally:
+        _current_finding.reset(token)
+
+
+def _record(category: str, text: str, detail: str = "") -> None:
+    finding = _current_finding.get()
+    if finding is not None:
+        getattr(finding, category).append(text + (f" {detail}" if detail else ""))
+
+
 def _mark(glyph: str, col: str):
-    return lambda text, detail="": print(f"  {color(glyph, col)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
+    def report(text, detail=""):
+        if glyph == "⚠":
+            _record("warnings", text, detail)
+        print(f"  {color(glyph, col)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
+    return report
 
 
 check_ok, check_warn, check_fail = _mark("✓", Colors.GREEN), _mark("⚠", Colors.YELLOW), _mark("✗", Colors.RED)
+
+
+def check_unavailable(text: str, detail: str = "") -> None:
+    _record("unavailable", text, detail)
+    check_info(f"Unavailable: {text} {detail}".rstrip())
+
+
+def check_unverified(text: str, detail: str = "") -> None:
+    _record("unverified", text, detail)
+    check_info(f"Unverified: {text} {detail}".rstrip())
 
 
 def check_info(text: str):
@@ -47,7 +81,8 @@ def warn_on_error(text: str, detail: str = "({e})", report=check_warn):
     try:
         yield
     except Exception as e:
-        if text:
+        check_unverified(text.format(e=e) if text else "Check could not complete", str(e))
+        if text and report is not check_warn:
             report(text.format(e=e), detail.format(e=e))
 
 
@@ -58,28 +93,40 @@ class Finding:
     issues: list = field(default_factory=list)
     manual_issues: list = field(default_factory=list)
     fixed: int = 0
+    security: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+    unavailable: list = field(default_factory=list)
+    unverified: list = field(default_factory=list)
 
     def merge(self, other: Finding) -> None:
         self.issues.extend(other.issues)
         self.manual_issues.extend(other.manual_issues)
         self.fixed += other.fixed
+        for category in ("security", "warnings", "unavailable", "unverified"):
+            getattr(self, category).extend(getattr(other, category))
 
 
 def doctor_check(on_error: str | None = None, detail: str = ""):
     """Turn ``fn(should_fix, f: Finding)`` into a ``(should_fix) -> Finding`` doctor check.
 
-    *on_error* None: exceptions propagate (as they always did for that check). Otherwise the check is
-    best-effort via :func:`warn_on_error` (``""`` = silent) and the partial Finding is still returned,
-    so issues recorded before the crash survive."""
+    Exceptions are recorded as unverified and the partial Finding is returned, so established
+    errors or vulnerabilities survive a later failure. *on_error* supplies a user-facing label."""
     def deco(fn):
         @functools.wraps(fn)
         def check(should_fix: bool) -> Finding:
             f = Finding()
-            if on_error is None:
-                fn(should_fix, f)
-            else:
-                with warn_on_error(on_error, detail):
+            token = _current_finding.set(f)
+            try:
+                if on_error is None:
                     fn(should_fix, f)
+                else:
+                    with warn_on_error(on_error, detail):
+                        fn(should_fix, f)
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Doctor check %s failed", fn.__name__)
+                check_unverified(f"{fn.__name__} could not complete", str(exc))
+            finally:
+                _current_finding.reset(token)
             return f
         return check
     return deco
