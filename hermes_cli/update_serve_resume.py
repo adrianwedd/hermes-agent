@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from pathlib import Path
 import sys
 
@@ -20,8 +21,10 @@ def main(context: Path, result: Path) -> int:
         activate_dependencies(root)
         from hermes_cli.dashboard_procs import _filter_dashboard_respawn_candidates
         from hermes_cli.main_dashboard import _respawn_dashboard_processes
+        from hermes_cli.update_serve_readiness import verify_released_and_ready
 
         candidates = []
+        entries = []
         skipped = 0
         for entry in token.get("entries") or []:
             port = entry.get("port")
@@ -38,14 +41,47 @@ def main(context: Path, result: Path) -> int:
                 command += ["--host", str(entry["host"])]
             command += ["--port", str(port)]
             candidates.append((entry.get("pid", 0), command, entry.get("hermes_home") or None))
+            entries.append(entry)
         commands = _filter_dashboard_respawn_candidates(candidates, own_home=request.get("home"))
         skipped += len(candidates) - len(commands)
-        # An acknowledged attempt is terminal even if spawning failed: replaying
-        # the whole token at atexit would duplicate the successful backends.
-        failed = _respawn_dashboard_processes(commands) if commands else []
+        # Pair each surviving command with its token entry by the port it carries, so a skipped
+        # candidate is never spawned and each spawned backend is verified on its own port.
+        by_port = {}
+        kept = []
+        for command in commands or []:
+            command = list(command)
+            port = None
+            for index, part in enumerate(command):
+                if part == "--port" and index + 1 < len(command):
+                    with suppress(ValueError):
+                        port = int(command[index + 1])
+            if port is None:
+                continue
+            by_port[port] = command
+            for entry in entries:
+                if entry.get("port") == port:
+                    kept.append(entry)
+                    break
+
+        def spawn(ready_entries):
+            selected = [by_port[e.get("port")] for e in ready_entries if e.get("port") in by_port]
+            # An acknowledged attempt is terminal even if spawning failed: replaying
+            # the whole token at atexit would duplicate the successful backends.
+            return _respawn_dashboard_processes(selected) if selected else []
+
+        failures, ready = verify_released_and_ready(kept, spawn)
         handled = True
-        if skipped or failed:
-            print("Some stopped backends could not be relaunched; restart them manually.", file=sys.stderr)
+        if skipped:
+            failures.append(f"{skipped} stopped backend(s) were not relaunchable from the recorded token")
+        if failures:
+            for line in failures:
+                print(f"  ✗ {line}", file=sys.stderr)
+            if not ready:
+                print("Some stopped backends could not be relaunched; restart them manually.",
+                      file=sys.stderr)
+            else:
+                print(f"  {len(ready)} of {len(kept)} stopped backend(s) are serving again.",
+                      file=sys.stderr)
             return 1
         return 0
     except Exception as exc:

@@ -325,9 +325,20 @@ def test_serve_resume_child_reuses_respawn_without_updater_or_supervisors(tmp_pa
                                   "stopped_serves": {"pending": True, "entries": entries}}))
     program = tmp_path / "probe.py"
     program.write_text(
-        "import json, os, runpy, subprocess, sys, time\nfrom pathlib import Path\n"
+        "import json, os, runpy, socket, subprocess, sys, time\nfrom pathlib import Path\n"
         "calls = []\n"
         "time.sleep = lambda *_: None\n"
+        # The replacements actually serve: a relaunch that is acknowledged but never accepts a
+        # connection is a failure now (hermes_cli.update_serve_readiness), so the fixture binds the
+        # two recorded ports the way a healthy backend would.
+        "keepers = []\n"
+        "for family, addr, port in ((socket.AF_INET, '127.0.0.1', 8119), (socket.AF_INET6, '::1', 8120)):\n"
+        "    sock = socket.socket(family, socket.SOCK_STREAM)\n"
+        "    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "    try:\n"
+        "        sock.bind((addr, port)); sock.listen(8); keepers.append(sock)\n"
+        "    except OSError:\n"
+        "        sock.close()\n"
         "def forbidden(*args, **kwargs):\n    raise AssertionError('updater/process control ran')\n"
         "class _Proc:\n    def poll(self):\n        return None\n"
         "def spawn(command, **kwargs):\n"
