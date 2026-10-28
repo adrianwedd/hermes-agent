@@ -784,12 +784,12 @@ class TestFilterDashboardRespawnCandidates:
 
 
 class TestCmdlineCapture:
-    """_dashboard_cmdline_for_pid reads /proc on Linux, ps on macOS."""
+    """_dashboard_cmdline_for_pid reads /proc on Linux; native macOS coverage is separate."""
 
     def _live(self):
         return main_dashboard
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX /proc cmdline path")
+    @pytest.mark.platforms("linux")
     def test_reads_proc_cmdline_when_available(self, tmp_path, monkeypatch):
         live = self._live()
         proc_file = tmp_path / "cmdline"
@@ -815,7 +815,7 @@ class TestCmdlineCapture:
 
         assert argv == ["/usr/bin/python3", "-m", "hermes_cli.main", "serve"]
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX ps cmdline fallback")
+    @pytest.mark.platforms("linux")
     def test_falls_back_to_ps_without_proc(self, monkeypatch):
         live = self._live()
 

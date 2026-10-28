@@ -372,10 +372,19 @@ def _restart_launchd_job(domain: str, label: str, old_pid: int | None, *, timeou
 
 
 def _dashboard_cmdline_for_pid(pid: int) -> list[str] | None:
-    """Exact argv of a running process: ``/proc/<pid>/cmdline`` (Linux), ``ps -o command=`` + shlex
+    """Exact argv of a running process: ``/proc/<pid>/cmdline`` (Linux), native psutil argv
     (macOS), None on Windows (no graceful taskkill window; Desktop manages its backend)."""
     if sys.platform == "win32":
         return None
+    if sys.platform == "darwin":
+        # ps renders argv as display text, losing quoting and escaping newlines.
+        # Splitting it turns a multiline Python -c program into separate arguments.
+        import psutil
+
+        try:
+            return psutil.Process(pid).cmdline() or None
+        except psutil.Error:
+            return None
     try:
         cmdline_path = f"/proc/{pid}/cmdline"
         if os.path.exists(cmdline_path):
