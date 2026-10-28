@@ -348,6 +348,64 @@ def _unrestored_autostash_notice() -> Optional[str]:
             f"  Re-apply with: git stash show -p {stash_ref} | git apply --3way")
 
 
+#: Namespace for local-work pins (``refs/hermes-localwork/<branch>-<stamp>-<sha12>``). Nothing expires
+#: them, which is exactly why they have to be discoverable rather than silently accumulating.
+_PIN_REF_PREFIX = "refs/hermes-localwork/"
+
+
+def discover_local_work_pins(git_cmd: list[str], cwd: Path) -> list[dict[str, object]]:
+    """Every unresolved local-work pin: what it holds, when, and whether a stash entry still does.
+
+    Discovery only — nothing is dropped, expired or rewritten. A pin with no matching stash entry is
+    the only remaining copy of that work, so it is reported as such rather than tidied away.
+    """
+    from hermes_cli.update_cmd_git import _git_run
+    refs = _git_run(
+        git_cmd,
+        ["for-each-ref", "--format=%(refname)%09%(objectname)%09%(committerdate:iso-strict)",
+         _PIN_REF_PREFIX],
+        cwd,
+    )
+    if refs.returncode != 0:
+        return []
+    stashes = _git_run(git_cmd, ["stash", "list", "--format=%H"], cwd)
+    held = set((stashes.stdout or "").split()) if stashes.returncode == 0 else set()
+    pins: list[dict[str, object]] = []
+    for line in (refs.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        ref, commit, when = parts[0], parts[1], parts[2]
+        pins.append({
+            "ref": ref,
+            "commit": commit,
+            "date": when,
+            "stash_entry": commit in held,
+            "recover_with": f"git stash show -p {ref} | git apply --3way",
+        })
+    return pins
+
+
+def report_local_work_pins(git_cmd: list[str], cwd: Path) -> int:
+    """Print unresolved pins (count returned). Called wherever stale autostashes are surfaced."""
+    try:
+        pins = discover_local_work_pins(git_cmd, cwd)
+    except Exception as exc:  # discovery must never break an update
+        logger.debug("Local-work pin discovery failed: %s", exc)
+        return 0
+    if not pins:
+        return 0
+    only_copy = [pin for pin in pins if not pin["stash_entry"]]
+    print(f"⚠ {len(pins)} saved local-work reference(s) from earlier updates are still unresolved:")
+    for pin in pins:
+        state = "stash entry present" if pin["stash_entry"] else "NO stash entry left — this ref is the only copy"
+        print(f"    {pin['ref']}  ({pin['date']}, {state})")
+        print(f"      {pin['recover_with']}")
+    if only_copy:
+        print("  Restore or discard these deliberately; Hermes never expires them.")
+    return len(pins)
+
+
 def _warn_orphaned_update_autostashes(git_cmd: list[str], cwd: Path) -> int:
     """Print a notice for update autostashes older than the warn threshold; return the count (0 on any git failure).
 

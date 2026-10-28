@@ -147,3 +147,21 @@ def test_entries_without_a_usable_port_are_ignored(entry):
         [entry], lambda entries: spawned.append(list(entries)) or [],
         release_timeout=0.1, ready_timeout=0.1)
     assert (failures, ready, spawned) == ([], [], [])
+
+
+def test_a_listener_already_on_the_port_is_not_the_replacement():
+    """Something else answering on the port must never be reported as the relaunched backend."""
+    listener = _Listener()
+    spawned: list[list] = []
+    try:
+        failures, ready = ready_mod.verify_released_and_ready(
+            [{"purpose": "dashboard", "host": "127.0.0.1", "port": listener.port}],
+            lambda entries: spawned.append(list(entries)) or [],
+            ready_timeout=0.3,
+        )
+    finally:
+        listener.close()
+
+    assert spawned, "the replacement is still launched; only its readiness verdict is withheld"
+    assert ready == []
+    assert len(failures) == 1 and "already accepting connections" in failures[0]

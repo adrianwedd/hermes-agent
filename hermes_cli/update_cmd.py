@@ -81,7 +81,7 @@ from hermes_cli.update_cmd_stash import (
     _git_untracked_paths, _park_stashed_changes, _print_stash_cleanup_guidance,
     _reject_unsafe_stash_restore, _resolve_stash_selector, _restore_stashed_changes,
     _restored_python_paths, _stash_apply_failed_only_on_existing_untracked,
-    _stash_local_changes_if_needed, _unrestored_autostash_notice,
+    _stash_local_changes_if_needed, _unrestored_autostash_notice, report_local_work_pins,
     _warn_orphaned_update_autostashes)
 from hermes_cli.update_cmd_config import (
     _LAST_SIBLING_SNAPSHOTS, _check_and_apply_config_migration, _migrate_sibling_profile_configs,
@@ -1908,6 +1908,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Surface autostash entries left behind by earlier updates (#63717 problem 6) — parked --keep-stash
         # runs and failed restores preserve the stash but nothing ever mentioned it again.
         _m()._warn_orphaned_update_autostashes(git_cmd, _m().PROJECT_ROOT)
+        # Pins outlive the stash entries they were taken with: surface the ones nothing has settled
+        # (discovery only — Hermes never expires them).
+        report_local_work_pins(git_cmd, _m().PROJECT_ROOT)
 
         # A shallow checkout's plain fetch drags in ~the whole history and cannot finish inside
         # the network cap (#123254); its grafts also make merge-base report orphan divergence

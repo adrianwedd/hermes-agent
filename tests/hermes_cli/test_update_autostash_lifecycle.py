@@ -245,3 +245,57 @@ def test_discard_retires_the_pin_only_when_the_drop_succeeded(repo: Path):
     assert _stashes(repo) == ""
     assert _localwork_refs(repo) == []
     assert stash_mod._pending_autostash_ref is None
+
+
+# --- discovery of unresolved pins ------------------------------------------------------------
+
+def test_pin_discovery_reports_provenance_and_stash_availability(repo: Path):
+    _dirty(repo)
+    stash_ref = _stash(repo)
+    pin = stash_mod._pending_autostash_ref
+    assert pin
+
+    pins = stash_mod.discover_local_work_pins(GIT, repo)
+    assert len(pins) == 1
+    entry = pins[0]
+    assert entry["ref"] == pin
+    assert entry["commit"] == stash_ref
+    assert entry["stash_entry"] is True
+    assert entry["date"]
+    assert entry["recover_with"] == f"git stash show -p {pin} | git apply --3way"
+
+
+def test_pin_discovery_flags_the_only_remaining_copy(repo: Path, capsys):
+    _dirty(repo)
+    _stash(repo)
+    _run(repo, "stash", "clear")  # the reflog entry is gone; the pin is all that is left
+
+    pins = stash_mod.discover_local_work_pins(GIT, repo)
+    assert len(pins) == 1 and pins[0]["stash_entry"] is False
+
+    assert stash_mod.report_local_work_pins(GIT, repo) == 1
+    out = capsys.readouterr().out
+    assert "NO stash entry left" in out
+    assert "never expires them" in out
+
+
+def test_pin_discovery_is_empty_once_the_work_is_settled(repo: Path):
+    _dirty(repo)
+    stash_ref = _stash(repo)
+    _run(repo, "stash", "apply", stash_ref)
+
+    assert stash_mod._verify_and_settle_restore(GIT, repo, stash_ref) is True
+    assert stash_mod.discover_local_work_pins(GIT, repo) == []
+    assert stash_mod.report_local_work_pins(GIT, repo) == 0
+
+
+def test_pin_discovery_never_drops_anything(repo: Path):
+    """Discovery is a report: the pin and the stash entry both survive it."""
+    _dirty(repo)
+    stash_ref = _stash(repo)
+    pin = stash_mod._pending_autostash_ref
+
+    stash_mod.report_local_work_pins(GIT, repo)
+
+    assert _run(repo, "rev-parse", pin).stdout.strip() == stash_ref
+    assert stash_ref in _stashes(repo)

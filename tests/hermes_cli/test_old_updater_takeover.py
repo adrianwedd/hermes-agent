@@ -332,11 +332,12 @@ def test_serve_resume_child_reuses_respawn_without_updater_or_supervisors(tmp_pa
         # connection is a failure now (hermes_cli.update_serve_readiness), so the fixture binds the
         # two recorded ports the way a healthy backend would.
         "keepers = []\n"
-        "for family, addr, port in ((socket.AF_INET, '127.0.0.1', 8119), (socket.AF_INET6, '::1', 8120)):\n"
+        "def serve(host, port):\n"
+        "    family = socket.AF_INET6 if ':' in host else socket.AF_INET\n"
         "    sock = socket.socket(family, socket.SOCK_STREAM)\n"
         "    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
         "    try:\n"
-        "        sock.bind((addr, port)); sock.listen(8); keepers.append(sock)\n"
+        "        sock.bind((host, port)); sock.listen(8); keepers.append(sock)\n"
         "    except OSError:\n"
         "        sock.close()\n"
         "def forbidden(*args, **kwargs):\n    raise AssertionError('updater/process control ran')\n"
@@ -345,6 +346,10 @@ def test_serve_resume_child_reuses_respawn_without_updater_or_supervisors(tmp_pa
         "    assert kwargs['start_new_session'] is True\n"
         "    assert kwargs['stdin'] == subprocess.DEVNULL\n"
         "    calls.append(command)\n"
+        # The replacement binds its port only once it is launched: a listener that already existed
+        # would be someone else's, and the readiness check must not accept it.
+        "    if '--port' in command:\n"
+        "        serve(command[command.index('--host') + 1], int(command[command.index('--port') + 1]))\n"
         f"    if {spawn_fails!r}:\n        raise OSError('probe spawn failed')\n"
         "    return _Proc()\n"
         "subprocess.Popen = spawn\nsubprocess.run = os.system = os.kill = forbidden\n"

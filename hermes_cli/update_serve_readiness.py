@@ -90,6 +90,15 @@ def verify_released_and_ready(
                             f"{release_timeout:g}s; it was not restarted onto a held port")
 
     spawn_failures = []
+    # A listener already on the port is not evidence about the replacement. Record the ports that
+    # accept before the spawn so an unrelated process (or a survivor of the stopped backend) can
+    # never be counted as the thing we just launched.
+    pre_held = {
+        entry.get("port") for entry in released
+        if isinstance(entry.get("port"), int)
+        and _listening(str(entry.get("host") or "127.0.0.1"), entry["port"])
+    }
+
     if released:
         spawn_failures = list(spawn(released) or [])
         for item in spawn_failures:
@@ -104,6 +113,10 @@ def verify_released_and_ready(
         host = str(entry.get("host") or "127.0.0.1")
         port = entry.get("port")
         if not isinstance(port, int):
+            continue
+        if port in pre_held:
+            failures.append(f"{_label(entry)} was already accepting connections before the relaunch; "
+                            "that listener is not the replacement, so its readiness is not established")
             continue
         if wait_for_ready(host, port, ready_timeout):
             ready.append(entry)
