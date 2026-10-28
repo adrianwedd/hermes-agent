@@ -96,7 +96,7 @@ def _render_state_db_stats(stats: dict, holders=None, host_note: str = "") -> li
     # pending, an earlier run stopped before tearing down the old index, or the stored FTS layout is an
     # older release's (not just a lagging marker).
     if logical is not None and logical > STATE_DB_SIZE_WARN_BYTES:
-        detail = "consider enabling sessions.auto_prune in config.yaml to bound growth"
+        detail = "sessions.auto_prune is optional destructive maintenance; enable only with explicit retention authorisation"
         structural_fts_upgrade = bool(stats.get("fts_storage_upgrade_needed"))
         if stats.get("fts_rebuild_pending") or stats.get("fts_teardown_pending") or structural_fts_upgrade:
             detail += "; run 'hermes sessions optimize-storage' offline (with the host gateway stopped) to compact FTS storage"
@@ -261,15 +261,19 @@ def _check_scratch_dir(hermes_home: Path, _DHH: str) -> None:
         SCRATCH_DIR_MARKER_ENV, SCRATCH_MAX_IDLE_HOURS, get_scratch_dir, scratch_dir_usage_bytes)
     scratch = get_scratch_dir(hermes_home, prune=False)
     size = _human_bytes(scratch_dir_usage_bytes(scratch))
-    check_ok(f"{_DHH}/cache/scratch/ is the scratch dir (TMPDIR; {size}, entries pruned after {SCRATCH_MAX_IDLE_HOURS}h idle)")
-    from hermes_constants_scratch_stuck import removal_hint, stuck_entries
+    check_info(f"{_DHH}/cache/scratch/ is the runtime scratch dir (TMPDIR; {size}; "
+               f"explicit pruning uses a {SCRATCH_MAX_IDLE_HOURS}h idle threshold). "
+               "Project artefacts belong in their canonical project folder; "
+               "relocation or deletion requires explicit authorisation.")
+    from hermes_constants_scratch_stuck import stuck_entries
     for entry in stuck_entries(scratch):
-        check_warn(f"{_DHH}/cache/scratch/{entry.name}/ holds files you may not delete, so the prune skips it — {removal_hint(entry)}")
+        check_warn(f"{_DHH}/cache/scratch/{entry.name}/ was skipped by pruning because files were not removable; "
+                   "retain them pending an explicitly authorised review")
     for name, nbytes in unpruned_cache_hogs(hermes_home):
         check_warn(
-            f"{_DHH}/cache/{name}/ is {_human_bytes(nbytes)} and outside every pruner "
-            f"(only cache/scratch/ and cache/terminal/ are reaped) — move task files under "
-            f"cache/scratch/<task>/ or delete it"
+            f"{_DHH}/cache/{name}/ is {_human_bytes(nbytes)} and outside the scratch/terminal pruners. "
+            f"Review ownership and retention before any explicitly authorised relocation or deletion; "
+            f"keep project artefacts in their canonical project folder, never in prunable runtime scratch."
         )
     tmpdir = os.environ.get("TMPDIR", "")
     if tmpdir and tmpdir != os.environ.get(SCRATCH_DIR_MARKER_ENV, ""):
@@ -415,7 +419,7 @@ def _state_db_stats(issues: list, state_db_path: Path) -> None:
                 continue
             check_warn(_text, _detail)
             if "auto_prune" in _detail:
-                issues.append("state.db is large — enable sessions.auto_prune in config.yaml"
+                issues.append("state.db is large — review retention; sessions.auto_prune requires explicit authorisation"
                               + (" and run 'hermes sessions optimize-storage' offline (gateway stopped)" if "optimize-storage" in _detail else ""))
 
 
@@ -516,7 +520,8 @@ def _check_checkpoint_store(should_fix: bool, f: Finding) -> None:
     from tools.checkpoint_maintenance import checkpoint_footprint_notice
     notice = checkpoint_footprint_notice()
     if notice:
-        check_warn(notice)
+        check_warn(notice + " Deletion or retention changes require explicit authorisation; "
+                   "store size alone does not establish that checkpoints are disposable.")
 
 
 def _plugin_provenance_rows(plugins_dir) -> list:
