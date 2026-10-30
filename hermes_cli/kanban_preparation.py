@@ -341,10 +341,18 @@ def prepare_tick(conn, *, limit=1, scan_limit=64, facts_loader=runtime_facts):
             latest_payload = {}
         if (current_decision and latest_payload.get('decision_fingerprint') ==
                 current_decision['decision_fingerprint'] and
-                latest_payload.get('prepared') is False):
+                latest_payload.get('prepared') is not True):
             # Event-driven reassessment: an unchanged refusal is not useful
             # work and must not produce one event/model/worker cycle per tick.
             continue
+        # A legacy payload carries only {'reason': ...}, so the equality test above
+        # can never match and the card was re-prepared on every tick — 538
+        # `preparation_checked` events in six hours on one card. Fall through and
+        # prepare ONCE: the refusal recorded under unknown older conditions may
+        # have cleared (a profile that now exists, a workspace that is now free),
+        # and stamping the current fingerprint onto it untested would suppress
+        # work that is now runnable. One real attempt per legacy card, then the
+        # fingerprint makes every unchanged tick a no-op.
         result = prepare_task(conn, row[0], facts_loader=facts_loader)
         results.append(result)
         with kbc.write_txn(conn):

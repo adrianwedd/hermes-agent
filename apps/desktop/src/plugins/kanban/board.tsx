@@ -1,6 +1,6 @@
 import { hermesApi } from '@/hermes'
+import { CardAlert, tileSummary } from './card-facts'
 import { $workerCardRequest } from './kanban-card-navigation'
-import { CardFacts } from './card-facts'
 import { cardIsTerminal } from './dispatch-facts'
 /**
  * The Kanban board page — mounted at `/kanban` (a ROUTES_AREA contribution) in
@@ -321,7 +321,10 @@ function Card({
   const k = useKanban()
   const [dragging, setDragging] = useState(false)
   const meta = columnMeta(task.status)
-  const summary = task.latest_summary || task.body
+  // The tile carries the run's own summary when one exists, and never falls back to
+  // `body`: those bodies are multi-kilobyte briefs, and a two-line clamp of one read
+  // as a paragraph of contract prose under every card. The full body is in the drawer.
+  const summary = tileSummary(task.latest_summary)
   const fallback = useDefaultAssignee()
   const arc = arcState(task, fallback)
 
@@ -362,9 +365,9 @@ function Card({
             {task.title || task.id}
           </span>
           {summary && (
-            <span className="line-clamp-2 text-[0.6875rem] leading-snug text-(--ui-text-tertiary)">{summary}</span>
+            <span className="line-clamp-1 text-[0.6875rem] leading-snug text-(--ui-text-tertiary)">{summary}</span>
           )}
-          <CardFacts task={task} />
+          <CardAlert task={task} />
           <CardFooter arc={arc} task={task} />
         </div>
       </ContextMenuTrigger>

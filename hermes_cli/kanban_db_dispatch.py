@@ -2414,8 +2414,146 @@ def _tick_spawn_budget(
     return True, spawn_budget
 
 
+DISPATCH_AUTHORISATION_EVENT = "dispatch_authorised"
+
+HEAVY_ASSIGNEES_DEFAULT = ("bench",)
+
+# Headroom a heavyweight card must find when it declares no size of its own.
+# ~1.5x the largest observed residency (169 GiB) would be too strict for a small
+# model; a quarter of this machine is the smallest defensible floor.
+HEAVY_UNKNOWN_PEAK_FLOOR_GIB = 64.0
+
+# How long a pre-spawn reservation may block other heavy work if the spawn never
+# happens. The worker's own residency, once loaded, is visible in live memory.
+SPAWN_HOLD_TTL_SECONDS = 60
+
+
+def _heavy_assignees() -> tuple:
+    try:
+        from hermes_cli.config import load_config
+
+        configured = ((load_config() or {}).get("kanban", {}) or {}).get("heavy_assignees")
+        if isinstance(configured, (list, tuple)) and configured:
+            return tuple(str(item) for item in configured)
+    except Exception:
+        pass
+    return HEAVY_ASSIGNEES_DEFAULT
+
+
+def declared_peak_gib(conn: sqlite3.Connection, task_id: str) -> tuple[Optional[float], Optional[str]]:
+    """Card's declared model residency, from its completion contract."""
+    try:
+        from hermes_cli.kanban_completion_evidence import contract_record
+
+        _cid, contract = contract_record(conn, task_id)
+    except Exception:
+        return None, None
+    if not isinstance(contract, dict):
+        return None, None
+    for key in ("peak_memory_gib", "peak_gib"):
+        value = contract.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return float(value), contract.get("model_id")
+    return None, contract.get("model_id")
+
+
+def admit_heavy_work(conn: sqlite3.Connection, task) -> dict:
+    """Refuse to start a model-heavy worker the machine cannot hold right now.
+
+    A 169 GiB residency is not an ordinary coding task. Ordinary cards pass
+    untouched; a card on a heavy profile (``bench`` by default) or one that
+    declares ``peak_memory_gib`` must fit in live available memory first.
+    """
+    peak, model_id = declared_peak_gib(conn, task.id)
+    heavy = bool(getattr(task, "assignee", None) in _heavy_assignees() or peak is not None)
+    if not heavy:
+        return {"admitted": True}
+    from hermes_cli.local_runtime import residency_gate
+
+    if peak is None:
+        peak = residency_gate.estimate_peak_gib(None, model_id) if model_id else None
+    if peak is None:
+        # No declaration and no identity. Prefer evidence over a guess: this
+        # machine has loaded 169.235 GiB before, so an unknown heavyweight job is
+        # priced at the heaviest load it has actually held. The floor only applies
+        # before anything has ever been measured here.
+        peak = residency_gate.heaviest_calibrated_gib() or residency_gate.conservative_unknown_peak()
+    # Atomic: the check and the hold happen under one lock, so two candidates in
+    # the same tick cannot both pass against the same headroom. The hold is short
+    # (HOLD_TTL_SECONDS) and live RSS takes over once the load is resident.
+    # A short hold: it only has to bridge admission -> the worker becoming
+    # resident. If the claim or the spawn does not happen, the hold expires
+    # instead of refusing every other heavy card for ten minutes.
+    return residency_gate.admit(
+        f"dispatch:{task.id}", peak, ttl_seconds=SPAWN_HOLD_TTL_SECONDS, note=model_id or task.id
+    )
+
+
+def _reassessment_recorded(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id=? AND kind='host_loss_reassessment_required' "
+        "AND created_at >= ? LIMIT 1",
+        (task_id, _boot_time() or 0),
+    ).fetchone()
+    return row is not None
+
+
+def _last_run_interrupted_by_host_loss(conn: sqlite3.Connection, task, boot: Optional[int] = None) -> bool:
+    """Did the host go down under this card's last run?
+
+    The reboot path books the run as ``reclaimed`` (stale-claim release runs
+    before the pid sweep) or ``stale``, not ``crashed`` — checking only the
+    crash statuses made this safeguard never fire for the incident that
+    motivated it.
+    """
+    row = conn.execute(
+        "SELECT started_at, status FROM task_runs WHERE task_id=? "
+        "ORDER BY coalesce(ended_at, started_at) DESC, id DESC LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    if row is None:
+        return False
+    if row["status"] not in {"crashed", "timed_out", "spawn_failed", "reclaimed", "stale"}:
+        return False
+    return _interrupted_by_host_loss(row["started_at"], boot if boot is not None else _boot_time())
+
+
+def _boot_time() -> Optional[int]:
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["sysctl", "-n", "kern.boottime"],
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+        )
+        text = out.stdout or ""
+        if "sec =" in text:
+            return int(text.split("sec =")[1].split(",")[0].strip())
+    except Exception:
+        return None
+    return None
+
+
+def _interrupted_by_host_loss(started_at: Optional[int], boot: Optional[int]) -> bool:
+    """A run that began before this boot was killed by the host, not by itself."""
+    if boot is None or not isinstance(started_at, int) or started_at <= 0:
+        return False
+    return started_at < boot
+
+
 def _lane_rows(conn: sqlite3.Connection, status: str, result=None) -> list[sqlite3.Row]:
-    """Canonical-claimable rows of one lane in dispatch order."""
+    """Canonical-claimable rows of one lane in dispatch order.
+
+    Eligibility comes from the decision engine. Two narrow safeguards sit on top,
+    both aimed at hazards this machine has already demonstrated:
+
+    * a heavyweight model load must fit in live memory (the 169 GiB residency);
+    * a run killed by the host going down is not silently relaunched — it is held
+      for a fresh look, not for a permission slip.
+
+    Ordinary work is not gated on anything. Awareness goes to the worker (see
+    ``build_preflight``); gates are reserved for consequences that cannot be undone.
+    """
     rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
@@ -2424,14 +2562,53 @@ def _lane_rows(conn: sqlite3.Connection, status: str, result=None) -> list[sqlit
     from hermes_cli.kanban_decision import claim_allowed
 
     lane = "review" if status == "review" else "ready"
+    boot = _boot_time()
     eligible = []
     for row in rows:
         task = _kb.get_task(conn, row["id"])
-        allowed, decision = claim_allowed(conn, task, lane) if task is not None else (False, None)
-        if allowed:
-            eligible.append(row)
-        elif result is not None:
-            add_reason(result, admission_reason(decision))
+        if task is None:
+            continue
+        allowed, decision = claim_allowed(conn, task, lane)
+        if not allowed:
+            if result is not None:
+                add_reason(result, admission_reason(decision))
+            continue
+        try:
+            if _last_run_interrupted_by_host_loss(conn, task, boot):
+                # The host went down under this work. Hold it for ONE tick so it is
+                # not relaunched blind by the boot, then let it run: the worker's
+                # preflight names the interrupted run, its outcome and the live
+                # memory, which is the reassessment. This is a pause, not a
+                # quarantine and not a permission slip.
+                if not _reassessment_recorded(conn, task.id):
+                    capacity = admit_heavy_work(conn, task)
+                    if not capacity["admitted"]:
+                        # The reassessment that matters is not a scheduler tick; it is
+                        # whether this machine can hold the work NOW. Record the measured
+                        # refusal so the worker sees why it is waiting, and keep waiting.
+                        with _kbc.write_txn(conn):
+                            _kb._append_event(conn, task.id, "host_loss_reassessment_required", {
+                                "boot": boot,
+                                "measured": capacity.get("reason"),
+                                "note": "a previous run was interrupted by a host reboot; "
+                                        "capacity has not recovered, do not recreate the load",
+                            })
+                        if result is not None:
+                            add_reason(result, "interrupted_by_host_loss")
+                        continue
+            admission = admit_heavy_work(conn, task)
+            if not admission["admitted"]:
+                if result is not None:
+                    # A stable key, not the measurement: result.reasons is a fixed
+                    # metric vocabulary, and "needs 169.2 GiB, available 12.3 GiB"
+                    # would mint a new label per tick.
+                    add_reason(result, "residency_denied")
+                continue
+        except Exception as exc:  # a bad ledger must not kill the tick
+            if result is not None:
+                add_reason(result, "dispatch_gate_error")
+            continue
+        eligible.append(row)
     return eligible
 
 

@@ -2657,7 +2657,7 @@ def complete_task(
         conn, task_id, metadata, summary=summary, result=result,
     )
     handoff_summary = summary if summary is not None else result
-    from hermes_cli.kanban_completion_evidence import prepare_gate, record_gate
+    from hermes_cli.kanban_completion_evidence import OPEN_COMPLETION_STATUSES, prepare_gate, record_gate
     evidence_gate = _prepared_evidence if _prepared_evidence is not None else prepare_gate(conn, task_id, metadata, expected_run_id=expected_run_id, force=force)
     if evidence_gate is False:
         return False
@@ -2694,9 +2694,9 @@ def complete_task(
                        block_kind   = NULL,
                        block_recurrences = 0
                  WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked', 'review')
-                """
-        params: tuple = (result, now, task_id)
+                   AND status IN ({lanes})
+                """.format(lanes=",".join("?" * len(OPEN_COMPLETION_STATUSES)))
+        params: tuple = (result, now, task_id, *sorted(OPEN_COMPLETION_STATUSES))
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params = (*params, int(expected_run_id))
@@ -4316,10 +4316,15 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
         _ctx_attachments, _ctx_comments, _ctx_header, _ctx_parent_results, _ctx_prior_attempts,
         _ctx_role_history,
     )
+    from hermes_cli.kanban_preflight import preflight
     # One clock reading so every relative age in this rendering agrees.
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    try:
+        lines.append(preflight(conn, task))
+    except Exception as exc:  # awareness must never withhold the task itself
+        lines.append(f"## Live conditions\n\n- unavailable ({exc}); check the machine yourself before loading a model.")
     from hermes_cli.kanban_completion_workflow import append_completion_context
     append_completion_context(lines, conn, task_id)
     _ctx_attachments(lines, list_attachments(conn, task_id))

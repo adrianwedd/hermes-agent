@@ -16,6 +16,14 @@ KINDS = {"implementation", "audit", "research", "spec", "review", "program"}
 SHA = re.compile("[0-9a-f]{40}")
 REPO = re.compile("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
+# Lanes a card may legitimately be closed from. Everything except the terminal
+# pair: a `todo` card is a real card (a child whose parent just finished, an
+# operator-parked card, a card whose dependency has since landed), and refusing
+# it produced a false "snapshot changed" diagnosis with no way out.
+OPEN_COMPLETION_STATUSES = frozenset(
+    {"running", "ready", "blocked", "review", "todo", "scheduled", "triage"}
+)
+
 
 class CompletionEvidenceError(ValueError):
     def __init__(self, task_id, missing):
@@ -180,7 +188,7 @@ def _refuse(conn, task_id, missing, *, expected_snapshot=None):
     from hermes_cli.kanban_db_connect import write_txn
 
     with write_txn(conn):
-        if expected_snapshot is not None and _snapshot(conn, task_id) != expected_snapshot:
+        if expected_snapshot is not None and not _compatible_snapshot(_snapshot(conn, task_id), expected_snapshot):
             raise CompletionEvidenceError(task_id, ["Completion snapshot changed; preserve the current owner and reread"])
         _, current_contract = contract_record(conn, task_id)
         operator_review_pending = (
@@ -492,10 +500,21 @@ def prepare_gate(
     ensure_scope_contract(conn, task_id, authority="control_plane_completion_repair")
     snapshot = _snapshot(conn, task_id)
     if snapshot is None:
-        return False
-    if snapshot[0] not in {"running", "ready", "blocked", "review"} or (
-        expected_run_id is not None and snapshot[1] != expected_run_id
-    ):
+        raise CompletionEvidenceError(task_id, ["Task not found"])
+    if snapshot[0] not in OPEN_COMPLETION_STATUSES:
+        # A terminal card cannot be completed again, and saying so is the whole
+        # point: returning False here made the CLI report "completion evidence
+        # snapshot changed", which is a false diagnosis and an unbreakable retry
+        # loop. Any open lane — including `todo` (a child whose parent finished,
+        # an operator-parked card, a card whose dependency has since landed) —
+        # may be closed with an explicit result.
+        _refuse(
+            conn,
+            task_id,
+            [f"Card is already {snapshot[0]}; there is nothing left to complete."],
+            expected_snapshot=snapshot,
+        )
+    if expected_run_id is not None and snapshot[1] != expected_run_id:
         return False
     cid, contract = contract_record(conn, task_id)
     try:
@@ -564,10 +583,30 @@ def prepare_gate(
     }
 
 
+def _compatible_snapshot(current, expected):
+    """A promotion between open lanes is not a lost race.
+
+    ``todo -> ready`` changes nothing the gate depends on: same run, same assignee,
+    same contract, same evidence. Comparing the raw tuple made ``kanban complete``
+    return a bare ``False`` that the CLI renders as "unknown id or terminal state"
+    — the same false diagnosis this change set exists to remove. Everything else
+    (a different run, a different assignee, a new contract, a terminal status) is
+    still a genuine mismatch.
+    """
+    if current is None or expected is None:
+        return current == expected
+    if current[1:5] != expected[1:5]:
+        return False
+    return (
+        current[0] == expected[0]
+        or (current[0] in OPEN_COMPLETION_STATUSES and expected[0] in OPEN_COMPLETION_STATUSES)
+    )
+
+
 def record_gate(conn, task_id, prepared):
     from hermes_cli import kanban_db as kb
 
-    if _snapshot(conn, task_id) != prepared["snapshot"]:
+    if not _compatible_snapshot(_snapshot(conn, task_id), prepared["snapshot"]):
         return False
     _, contract = contract_record(conn, task_id)
     if _children_missing(conn, task_id, contract):
