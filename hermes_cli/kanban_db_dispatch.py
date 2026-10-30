@@ -2423,9 +2423,13 @@ HEAVY_ASSIGNEES_DEFAULT = ("bench",)
 # model; a quarter of this machine is the smallest defensible floor.
 HEAVY_UNKNOWN_PEAK_FLOOR_GIB = 64.0
 
-# How long a pre-spawn reservation may block other heavy work if the spawn never
-# happens. The worker's own residency, once loaded, is visible in live memory.
-SPAWN_HOLD_TTL_SECONDS = 60
+# How long a pre-spawn reservation may block other heavy work. It has to outlast a
+# slow start — the measured GLM load took 19.5 s to become resident, and a cold or
+# contended start is slower — because the hold is the only accounting that exists
+# between admission and the process appearing in the RSS scan. Five minutes is a
+# wide margin over that gap and still short enough that a failed spawn cannot
+# starve other heavy work.
+SPAWN_HOLD_TTL_SECONDS = 300
 
 
 def _heavy_assignees() -> tuple:
