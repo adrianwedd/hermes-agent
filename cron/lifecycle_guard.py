@@ -707,9 +707,19 @@ def contains_launchctl_submit_command(command: str) -> bool:
     Label-independent by design: a NEW job's label is attacker-chosen, so a neutral name defeats any
     label-anchored regex. Both verbs register a persistent launchd job — never safe in the gateway.
 
+    Heredoc bodies that are provably inert data are masked first, exactly as
+    ``_contains_unsafe_gateway_action`` does for the label-anchored pass. This matcher is the
+    label-INDEPENDENT one, so without the same masking it was strictly more restrictive than the
+    guard it front-runs: a `git commit -F -` message documenting `launchctl bootstrap gui/501/…`
+    was refused here while the enforcement pass would have allowed it. The stripper still fails
+    open on any ambiguity (unquoted delimiter, shell consumer, unterminated body), so an
+    executable heredoc is scanned as before.
+
     See #62891.
     """
-    for segment in _iter_command_segments(command):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    for segment in _iter_command_segments(strip_inert_heredoc_bodies(command)):
         index = _executed_command_index(segment)
         if index is not None and _executable_name(segment[index]) == "launchctl":
             arguments = segment[index + 1 :]

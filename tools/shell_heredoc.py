@@ -13,10 +13,20 @@ import re
 
 # Non-shell interpreters whose quoted heredoc bodies are data for THAT interpreter; optional
 # VAR=... assignments, ``env`` and a path prefix allowed. Narrow on purpose: unmatched = visible.
+#
+# ``git commit|tag`` are here because their heredoc body is the MESSAGE, consumed as opaque text
+# and never executed (``git commit -F -``, ``git tag -F -``). Without them, a commit message that
+# documents a command reads to every heredoc-aware guard as that command being run: measured, a
+# `git commit -F -` heredoc containing "launchctl bootstrap gui/501/…" was refused by the
+# label-independent lifecycle pre-scan, so the only way to record the fix was to stop writing it
+# on the command line. The body still has to pass through git, which stores it verbatim.
+# Anchored on the subcommand, not on ``git`` generally: an arbitrary git invocation may run
+# aliases or hooks and is deliberately left visible.
 _INERT_HEREDOC_CONSUMER_RE = re.compile(
     r"^\s*(?:[A-Z_][A-Z0-9_]*=\S+\s+)*(?:env\s+)?(?:[A-Za-z0-9_./-]+/)?"
-    r"(?:python(?:3(?:\.\d+)*)?|osascript|cat)(?=\s|$)",
+    r"(?:python(?:3(?:\.\d+)*)?|osascript|cat|git\s+(?:commit|tag))(?=\s|$)",
     re.IGNORECASE)
+
 
 
 def _span_end(command: str, cursor: int, closer: str) -> int:
